@@ -284,6 +284,21 @@ class Host:
                 "systemd_runtime": linux and Path("/run/systemd/system").is_dir(),
                 "gre_module_loaded": linux and Path("/sys/module/ip_gre").is_dir()}
 
+    def nft_table_comments(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Recover the table marker omitted by older nft JSON serializers."""
+        for item in snapshot.get("nftables", []):
+            table = item.get("table", {})
+            if (table.get("family"), table.get("name")) != ("ip", "twinlink") or "comment" in table:
+                continue
+            result = self.run(["nft", "list", "table", "ip", "twinlink"], check=False)
+            # Match only the table's leading comment, never a chain/rule comment.
+            # Missing/unreadable evidence must leave ownership unverified.
+            if not result["returncode"] and re.match(
+                    r'\A\s*table ip twinlink\s*\{\s*comment "twinlink-owned"\s*;?(?=\s|\})',
+                    result["stdout"] or ""):
+                table["comment"] = "twinlink-owned"
+        return snapshot
+
     def nft_snapshot(self) -> dict[str, Any]:
         result = self.run(["nft", "-j", "list", "ruleset"], check=False)
         if result["returncode"]:
@@ -293,7 +308,7 @@ class Host:
             if not isinstance(snapshot, dict):
                 raise ValueError("not an object")
             snapshot["available"] = True
-            return snapshot
+            return self.nft_table_comments(snapshot)
         except (ValueError, TypeError):
             return {"available": False, "error": "nft returned invalid JSON", "nftables": []}
 

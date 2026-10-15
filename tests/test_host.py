@@ -26,6 +26,32 @@ FORWARD = {"name": "web", "side": "vps1", "mode": "rathole", "protocol": "tcp",
            "running": True, "token": "super-secret-test-token"}
 
 
+class NftTableCommentTests(unittest.TestCase):
+    def test_snapshot_recovers_legacy_table_comment(self):
+        host = Host()
+        snapshot = {"nftables": [{"table": {"family": "ip", "name": "twinlink"}}]}
+        with patch.object(host, "run", side_effect=[
+                {"returncode": 0, "stdout": json.dumps(snapshot), "stderr": ""},
+                {"returncode": 0, "stdout": 'table ip twinlink {\n\tcomment "twinlink-owned"\n}\n', "stderr": ""}]):
+            self.assertEqual(host.nft_snapshot()["nftables"][0]["table"]["comment"], "twinlink-owned")
+
+    def test_fallback_never_infers_ownership_from_untrusted_evidence(self):
+        for code, text in [(0, 'table ip twinlink { chain x { comment "twinlink-owned" } }'),
+                           (0, 'table ip other { comment "twinlink-owned" }'),
+                           (0, 'table ip twinlink { comment "foreign" }'),
+                           (1, 'table ip twinlink { comment "twinlink-owned" }')]:
+            with self.subTest(code=code, text=text):
+                snapshot = {"nftables": [{"table": {"family": "ip", "name": "twinlink"}}]}
+                with patch.object(Host, "run", return_value={"returncode": code, "stdout": text, "stderr": ""}):
+                    self.assertNotIn("comment", Host().nft_table_comments(snapshot)["nftables"][0]["table"])
+
+    def test_explicit_foreign_json_marker_is_not_overridden(self):
+        snapshot = {"nftables": [{"table": {"family": "ip", "name": "twinlink", "comment": "foreign"}}]}
+        with patch.object(Host, "run") as run:
+            Host().nft_table_comments(snapshot)
+            run.assert_not_called()
+
+
 class FakeHost(Host):
     def __init__(self):
         self.link_data = [copy.deepcopy(LINK)]

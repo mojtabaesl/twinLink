@@ -166,9 +166,11 @@ class Engine:
             if any(s in result["stderr"].lower() for s in ("no such file", "does not exist")):
                 return None
             raise ApplyError("Cannot inspect nftables: " + result["stderr"])
-        table = json.loads(result["stdout"])
+        table = self.host.nft_table_comments(json.loads(result["stdout"]))
         records = table.get("nftables", [])
-        owned = any("table" in r and r["table"].get("comment") == "twinlink-owned" for r in records)
+        owned = any("table" in r and r["table"].get("family") == "ip"
+                    and r["table"].get("name") == "twinlink"
+                    and r["table"].get("comment") == "twinlink-owned" for r in records)
         if not owned:
             raise ApplyError("Foreign ip twinlink table exists; refusing takeover")
         return table

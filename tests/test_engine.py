@@ -382,6 +382,34 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(self.host.link_data)
         self.assertFalse(self.store.journal.exists())
 
+    def test_apply_and_reapply_when_nft_json_omits_table_comment(self):
+        run = self.host.run
+
+        def legacy_run(argv, **kwargs):
+            result = run(argv, **kwargs)
+            if argv[0] == "nft" and "-j" in argv and result["returncode"] == 0:
+                snapshot = json.loads(result["stdout"])
+                for row in snapshot["nftables"]:
+                    if "table" in row:
+                        row["table"].pop("comment", None)
+                result["stdout"] = json.dumps(snapshot)
+            return result
+
+        with patch.object(self.host, "run", side_effect=legacy_run):
+            self.apply(active_state())
+            self.apply(active_state("kernel"))
+            self.apply(self.store.read(), "reapply")
+            self.assertEqual(self.engine._table()["nftables"][0]["table"]["comment"], "twinlink-owned")
+        self.assertFalse(self.store.journal.exists())
+
+    def test_rule_comment_cannot_claim_unmarked_table(self):
+        self.host.nft = {"nftables": [{"table": {"family": "ip", "name": "twinlink"}}]}
+        self.host.nft_text = 'table ip twinlink {\n chain sentinel {\n comment "twinlink-owned"\n }\n}\n'
+        with self.assertRaisesRegex(ApplyError, "Foreign"):
+            self.apply(active_state())
+        self.assertFalse(self.host.link_data)
+        self.assertFalse(self.store.journal.exists())
+
     def test_foreign_unit_file_is_never_overwritten(self):
         self.host.unit_dir.mkdir()
         foreign = self.host.unit_dir / "twinlink-gre-edge.service"
