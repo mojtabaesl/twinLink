@@ -1,3 +1,5 @@
+![twinLink — GRE tunneling for Linux, with kernel forwarding and rathole TCP](docs/assets/readme-banner.png)
+
 # twinLink
 
 twinLink is a Python standard-library CLI for an IPv4 GRE link between two Linux VPSs, with independent kernel or rathole forwarding entries on that link. Both servers keep their own configuration. There is an interactive menu and scriptable commands; no web panel or SOCKS proxy is included.
