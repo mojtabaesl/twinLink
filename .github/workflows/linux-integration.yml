@@ -1,0 +1,34 @@
+name: Linux packet path
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  kernel-and-rathole:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux networking dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3 iproute2 nftables iputils-ping conntrack
+          sudo modprobe ip_gre
+      - name: Build the selected rathole release from upstream source
+        run: |
+          # v0.5.0 release commit; pin the source and its original lockfile.
+          git init /tmp/twinlink-rathole
+          git -C /tmp/twinlink-rathole remote add origin https://github.com/rathole-org/rathole.git
+          git -C /tmp/twinlink-rathole fetch --depth 1 origin ebb764ae53d7ffe4fcb45f83f7563bec5c74199d
+          git -C /tmp/twinlink-rathole checkout --detach FETCH_HEAD
+          # Its locked time 0.3.29 predates Rust 1.80's inference changes.
+          rustup toolchain install 1.75.0 --profile minimal
+          cargo +1.75.0 build --manifest-path /tmp/twinlink-rathole/Cargo.toml --release --locked --no-default-features --features server,client
+          /tmp/twinlink-rathole/target/release/rathole --version
+      - name: Run unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+      - name: Prove GRE packet paths and lifecycle in Linux namespaces
+        run: |
+          sudo env PYTHONDONTWRITEBYTECODE=1 TWINLINK_INTEGRATION=1 TWINLINK_RATHOLE_BINARY=/tmp/twinlink-rathole/target/release/rathole PYTHONPATH="$PWD" python3 -m unittest tests.integration.test_netns -v
