@@ -194,6 +194,27 @@ class ParsingTests(unittest.TestCase):
         actual[1]["masquerade"] = {"flags": ["random"]}
         self.assertNotEqual(_nft_signature(expected), _nft_signature(actual))
 
+    def test_nft_ct_state_array_and_set_have_same_membership(self):
+        # nftables 1.0.2 tests/py/any/ct.t.json uses a bare array for
+        # `ct state new,established`, and a set for `ct state {new,established}`.
+        for states in (["new", "established"], ["established", "related"]):
+            expected = [{"match": {"left": {"ct": {"key": "state"}},
+                                   "op": "==", "right": {"set": states}}}, {"accept": None}]
+            actual = copy.deepcopy(expected)
+            actual[0]["match"].update(op="in", right=list(reversed(states)))
+            self.assertEqual(_nft_signature(expected), _nft_signature(actual))
+            actual[0]["match"]["right"].append("invalid")
+            self.assertNotEqual(_nft_signature(expected), _nft_signature(actual))
+            actual[0]["match"].update(op="!=", right=states)
+            self.assertNotEqual(_nft_signature(expected), _nft_signature(actual))
+
+    def test_nft_ct_state_normalization_does_not_change_other_arrays(self):
+        expected = [{"match": {"left": {"payload": {"protocol": "tcp", "field": "dport"}},
+                               "op": "==", "right": {"set": [80, 443]}}}]
+        actual = copy.deepcopy(expected)
+        actual[0]["match"].update(op="in", right=[80, 443])
+        self.assertNotEqual(_nft_signature(expected), _nft_signature(actual))
+
 
 class TunnelTests(unittest.TestCase):
     def test_up_unknown_operstate_requires_reachable_peer(self):

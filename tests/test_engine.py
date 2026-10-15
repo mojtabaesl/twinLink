@@ -55,6 +55,7 @@ class MemoryHost(Host):
         self.ignore_delete = False
         self.corrupt_nft = False
         self.foreign_fragments = {}
+        self.rathole_version = "rathole \nBuild Timestamp:     2026-10-15T20:19:32Z\nBuild Version:       0.5.0\n"
 
     def require_linux_root(self):
         self.events.append("root-check")
@@ -99,6 +100,14 @@ class MemoryHost(Host):
                     "prio": priorities[chain], "policy": "accept"}})
             elif 'comment "twinlink:' in line:
                 comment, expressions = _rendered_rule_expressions(line)
+                # Model the real nft 1.0.2 read-back, independently of the
+                # renderer's explicit-set representation of ct states.
+                for expression in expressions:
+                    match = expression.get("match", {})
+                    if match.get("left") == {"ct": {"key": "state"}}:
+                        match["op"] = "in"
+                        if isinstance(match["right"], dict):
+                            match["right"] = match["right"]["set"]
                 if self.corrupt_nft:
                     for expression in expressions:
                         if "dnat" in expression:
@@ -221,7 +230,7 @@ class MemoryHost(Host):
         if argv[0] == "ping":
             return self._result(argv, stdout="3 packets transmitted, 3 received, 0% packet loss\nrtt min/avg/max/mdev = 1/2/3/1 ms")
         if argv[0] == "rathole" or "rathole" in Path(argv[0]).name:
-            return self._result(argv, stdout="rathole 0.5.0\n")
+            return self._result(argv, stdout=self.rathole_version)
         raise AssertionError("Unmodeled command: " + str(argv))
 
 
@@ -615,6 +624,25 @@ class TransactionTests(unittest.TestCase):
             self.apply(candidate)
         self.assertEqual(self.host.ip_forward, "0")
         self.assertEqual(self.store.read(), old)
+
+    def test_rathole_version_accepts_compact_and_upstream_build_banner(self):
+        self.apply(active_state())
+        old, candidate = self.store.read(), active_state("rathole")
+        for output in ("rathole 0.5.0\n", self.host.rathole_version):
+            with self.subTest(output=output):
+                self.host.rathole_version = output
+                self.engine.safety(old, candidate)
+
+    def test_rathole_version_rejects_wrong_missing_and_suffix_versions(self):
+        self.apply(active_state())
+        old, candidate = self.store.read(), active_state("rathole")
+        for output in ("rathole 0.5.1\n", "rathole 0.5.0-dev\n", "rathole 0.5.0.1\n",
+                       "rathole \nBuild Version: 0.5.1\n", "rathole \nBuild Version: 0.5.0-dev\n",
+                       "rathole \n", "Build Version: 0.5.0\n", "unrelated 0.5.0\n"):
+            with self.subTest(output=output):
+                self.host.rathole_version = output
+                with self.assertRaisesRegex(ApplyError, "Supported rathole version"):
+                    self.engine.safety(old, candidate)
 
     def test_rathole_apply_disable_delete_manage_listeners_and_secret_modes(self):
         self.engine.systemd = True

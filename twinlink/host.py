@@ -120,6 +120,15 @@ def _nft_signature(expressions: list[dict[str, Any]]) -> str:
                 normalized["set"] = sorted(normalized["set"], key=lambda item: json.dumps(item, sort_keys=True))
             if "match" in normalized:
                 match = normalized["match"]
+                # nft 1.0.2 renders comma-separated ct states as an array,
+                # while explicit state sets use {"set": [...]}. Both test
+                # membership; array ordering does not change the match.
+                if match.get("left") == {"ct": {"key": "state"}}:
+                    right = match.get("right")
+                    if isinstance(right, list):
+                        match["right"] = {"set": sorted(right)}
+                    if match.get("op") == "in":
+                        match["op"] = "=="
                 if isinstance(match.get("right"), dict) and "set" in match["right"]:
                     if match.get("op") in ("in", "=="):
                         match["op"] = "=="

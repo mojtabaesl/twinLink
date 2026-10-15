@@ -456,7 +456,12 @@ class Engine:
                     raise ApplyError("GRE peer must be reachable before enabling forwarding: " + str(status.get("reason")))
             if entry["mode"] == "rathole" and entry.get("running"):
                 result = self._run([self.rathole_binary, "--version"])
-                if not re.search(r"\brathole\s+0\.5\.0\b", result["stdout"] + result["stderr"]):
+                output = result["stdout"] + "\n" + result["stderr"]
+                version = re.search(r"(?m)^rathole[ \t]+(\S+)", output)
+                # Upstream source builds put the version in a separate field.
+                if version is None and re.search(r"(?m)^rathole[ \t]*$", output):
+                    version = re.search(r"(?m)^Build Version:[ \t]+(\S+)[ \t]*$", output)
+                if version is None or version.group(1) != "0.5.0":
                     raise ApplyError("Supported rathole version is 0.5.0 (TCP); supply --rathole-binary")
         self._files_safe(self.files(old).keys() | self.files(new).keys())
         self._units_safe(old, new)
