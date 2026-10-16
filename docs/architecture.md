@@ -2,6 +2,8 @@
 
 The CLI treats a GRE tunnel and its forwarding entries as separate resources. Each server stores a local version-1 JSON state with `tunnels` and `forwards` keyed by stable names. Desired runtime flags are distinct from live observations. Monitoring always reads the kernel or service manager and performs reachability probes.
 
+The menu presents two main tasks: GRE tunnels and Port forwarding, with maintenance under System tools. `forward setup` is the common guided entry point for Kernel and Rathole. It reuses saved GRE configuration; VPS1 chooses the forwarding method and VPS2 detects it from pairing text. Rathole installation, shared config creation, consolidation and config paths are public `forward` commands. The older `rathole` group reuses the same implementation for compatibility. Both methods use the existing forwarding state and transaction engine.
+
 ## Modules
 
 | Module | Responsibility |
@@ -59,9 +61,9 @@ GRE codes start `v1.`. Forward codes start `f1.`. Rathole bundles start `r1.` an
 
 GRE export whitelists the tunnel's name, side, public endpoints, both private addresses, key, MTU and TTL. It excludes forwarding credentials. Import swaps both endpoint/address pairs and side, regenerates the local interface name, and returns an unverified, stopped record. The CLI previews this decoded record with active runtime and boot flags before applying the import; verification remains false. Conflicts are validated before any application.
 
-Forward export explicitly includes a rathole token when applicable and must be written to a private mode-0600 file. Import matches the mirrored tunnel by endpoints, private addresses, key, MTU and TTL rather than a host-local tunnel name. A verified matching GRE tunnel is required. The canonical public bind remains VPS1's address on either host. Service name changes for rathole are refused because they would prevent server/client matching. Older revisions are rejected. Imports are stopped until explicitly started.
+Forward export explicitly includes a Rathole token when applicable. `forward pair-export` prints an `f1.` code for a Kernel entry or an `r1.` code for Rathole services; successful adds also print the appropriate code. File exports use private mode-0600 files. `forward pair-import` detects either format and matches the mirrored tunnel by endpoints, private addresses, key, MTU and TTL rather than a host-local tunnel name. A verified matching GRE tunnel is required. The canonical public bind remains VPS1's address on either host. Service name changes for Rathole are refused because they would prevent server/client matching. Older revisions are rejected. CLI imports are stopped by default; `--enable` starts/enables them, and the guided flow explicitly uses it.
 
-State, journals and rathole configurations contain secrets and require restricted permissions. Preserve them only in private backups. Human-readable previews and routine JSON responses redact tokens and private keys. Explicit forwarding export, Rathole pairing export, and successful Rathole setup output are the intentional token-transfer boundaries. Server private keys are excluded from every pairing format. Rathole bundle import validates all records before one local transaction; `--enable` explicitly enables/starts them. An export from VPS2 can update its existing VPS1 peer only while retaining that server's original keypair.
+State, journals and rathole configurations contain secrets and require restricted permissions. Preserve them only in private backups. Human-readable previews and routine JSON responses redact tokens and private keys. Explicit forwarding file/pairing exports and successful forwarding creation output are the intentional token-transfer boundaries. Server private keys are excluded from every pairing format. Rathole bundle import validates all records before one local transaction; `--enable` explicitly enables/starts them. An export from VPS2 can update its existing VPS1 peer only while retaining that server's original keypair.
 
 ## Health and proof
 

@@ -37,7 +37,7 @@ def _run(binary, argument):
     try:
         result = subprocess.run([str(binary), argument], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
-        raise ValidationError("Cannot execute rathole; run twinlink rathole install --apply or supply --rathole-binary") from None
+        raise ValidationError("Cannot execute rathole; run twinlink forward install-rathole --apply or supply --rathole-binary") from None
     if result.returncode:
         # Never echo native output: --genkey output can contain private keys.
         raise ValidationError("Rathole failed " + argument + "; check binary compatibility and Noise support")

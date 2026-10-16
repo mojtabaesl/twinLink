@@ -25,7 +25,7 @@ sudo scripts/install.sh --rathole /opt/rathole/rathole --rathole-sha256 TRUSTED_
 sudo twinlink --rathole-binary /opt/rathole/rathole doctor
 ```
 
-The source installer checks this supplied executable. Alternatively, `sudo twinlink rathole install --apply` downloads the official pinned release for Linux x86_64/ARM64, checks its version and Noise support, and installs it without overwriting an existing binary. Add `--sha256 HASH` for a trusted ZIP checksum. Pass `--rathole-binary` consistently when using a custom path. The default is `/usr/local/bin/rathole`.
+The source installer checks this supplied executable. Alternatively, `sudo twinlink forward install-rathole --apply` downloads the official pinned release for Linux x86_64/ARM64, checks its version and Noise support, and installs it without overwriting an existing binary. Add `--sha256 HASH` for a trusted ZIP checksum. Pass `--rathole-binary` consistently when using a custom path. The default is `/usr/local/bin/rathole`.
 
 Build without installing anything, including on a development Mac:
 
@@ -78,6 +78,8 @@ If VPS2 used a different name, use that local name there. `check --record --appl
 
 VPS1 exposes the public service and VPS2 reaches the backend. Each forwarding entry has its own stable name and local lifecycle. Create the backend service before starting the forward.
 
+Use **Port forwarding → Set up forwarding / add ports** from `sudo twinlink menu`, or run `sudo twinlink forward setup` directly. Both Kernel and Rathole use this flow. Saved GRE roles, tunnel names and addresses are reused. On VPS1, choose Kernel TCP/UDP or Rathole TCP with Noise. Kernel setup asks for a forwarding name, protocol, backend choice and public/backend port or range; relay ports are allocated automatically. Rathole setup asks for a config name/connection port and port mappings, installing its binary and generating credentials when needed. On VPS2, paste the resulting `f1.` or `r1.` code; the method and GRE peer are detected automatically. Review/apply starts the imported forwarding and enables it at boot. Config paths, health and lifecycle commands are in the same Forwarding menu. System tools contains overview, dependency checks, recovery and expert commands.
+
 For a TCP kernel forward on VPS1:
 
 ```sh
@@ -88,22 +90,22 @@ sudo twinlink forward add web --tunnel edge --mode kernel --protocol tcp \
 
 The destination must be reachable from VPS2. Applying `forward add` normally starts/enables the local entry; use `--disabled` to store it inactive while arranging peer setup. The public bind may be VPS1's primary or secondary assigned address, or `0.0.0.0`; the engine validates assignment on VPS1. Kernel mode first translates VPS1's public tuple to a dedicated relay port on VPS2's GRE address, then translates that relay tuple to the backend on VPS2. It supplies return-path NAT without installing a backend route or altering a default route. The relay port is allocated deterministically; `--relay-port` can set a nonconflicting port or equal-sized range explicitly. A range such as `8000-8010` maps to a matching destination range, or to one fixed destination port. Use `--protocol udp` for UDP kernel forwarding.
 
-For guided Rathole with Noise, after verifying GRE on both ends, run `sudo twinlink rathole setup` on both servers. The wizard detects the VPS role and reuses saved tunnel names/endpoints. On VPS1, enter a Rathole name and connection port (default 2333), choose a known backend address or enter a different one, then supply ports such as `8080:80,8443:443`. All services share one named config/process, transport port, default token and Noise keypair. Existing configs reuse their name/port/credentials when adding services. The wizard prints one `r1.` base64 pairing code; VPS2 matches its saved tunnel and imports the whole config with no name/port/IP re-entry. A host with both roles asks which role to use. Pairing text contains service tokens; transfer it privately. Noise private keys stay on VPS1.
+For guided Rathole with Noise, run `sudo twinlink forward setup --mode rathole` on VPS1, and `sudo twinlink forward setup` on VPS2. On VPS1, enter a Rathole name and connection port (default 2333), choose a known backend address or enter a different one, then supply ports such as `8080:80,8443:443`. All services share one named config/process, transport port, default token and Noise keypair. Existing configs reuse their name/port/credentials when adding services. The wizard prints one `r1.` base64 pairing code; VPS2 matches its saved tunnel and imports the whole config with no name/port/IP re-entry. A host with both roles asks which role to use. Pairing text contains service tokens; transfer it privately. Noise private keys stay on VPS1. Existing `twinlink rathole` commands remain compatible.
 
-To merge old configs, select **Combine saved forwarding into one Rathole config** in setup, or run `sudo twinlink rathole consolidate app --tunnel edge --transport-port 2333 --apply` on VPS1. This retains service names/tokens, creates one shared Noise keypair, and transactionally removes old units/configs. Import the fresh pairing code on VPS2. Consolidation interrupts the old tunnel services until their peer settings agree. Later config updates briefly restart all services in that shared process; individual ports still support independent stop/disable/delete. Re-exporting existing settings requires no name/port prompts.
+To merge old configs, select **Combine saved forwarding into one Rathole config** in setup, or run `sudo twinlink forward consolidate app --tunnel edge --transport-port 2333 --apply` on VPS1. This retains service names/tokens, creates one shared Noise keypair, and transactionally removes old units/configs. Import the fresh pairing code on VPS2. Consolidation interrupts the old tunnel services until their peer settings agree. Later config updates briefly restart all services in that shared process; individual ports still support independent stop/disable/delete. Re-exporting existing settings requires no name/port prompts.
 
-For one scriptable Rathole TCP forward instead (Noise is the default for new records):
+For scriptable Rathole TCP forwarding in one shared config:
 
 ```sh
 sudo twinlink --rathole-binary /opt/rathole/rathole forward add app \
-  --tunnel edge --mode rathole --protocol tcp \
-  --bind-address 198.51.100.10 --bind-port 8443 \
-  --destination-address 127.0.0.1 --destination-port 443 --apply
+  --tunnel edge --mode rathole --transport-port 2333 \
+  --bind-address 198.51.100.10 --ports 8080:80,8443:443 \
+  --destination-address 127.0.0.1 --apply
 ```
 
 Rathole runs a server on VPS1 and a client on VPS2. During first setup, VPS1 can commit its private connection listener while reporting `pending_peer`; its public service listener appears after the matching VPS2 client authenticates. A committed local setup is not a claim of forwarding health. This behavior follows the [selected upstream server implementation](https://github.com/rathole-org/rathole/blob/v0.5.0/src/server.rs). Its connection listener binds only to VPS1's private GRE address. Its public service listener uses the selected bind address and port. Each entry receives a strong token and a matching service name. `--transport-port` can override the private connection port if needed. Loopback backends are available in rathole mode because the client connects locally on VPS2.
 
-Rathole can also use `sudo twinlink rathole pair-export app` and paste the resulting code into `rathole setup` on the peer. After shared edits, generate/import a fresh code. To inspect paths without opening an editor, use `sudo twinlink rathole config app`; the default file is `/var/lib/twinlink/rathole/app.toml`, editable with `sudo vim /var/lib/twinlink/rathole/app.toml`. Manual edits are regenerated on reapply/boot restore; use `forward edit` for persistent changes.
+Rathole can also use `sudo twinlink forward pair-export app` and paste the resulting code into `forward setup` on the peer. After shared edits, generate/import a fresh code. To inspect paths without opening an editor, use `sudo twinlink forward config app`; the default file is `/var/lib/twinlink/rathole/app.toml`, editable with `sudo vim /var/lib/twinlink/rathole/app.toml`. Manual edits are regenerated on reapply/boot restore; use `forward edit` for persistent changes.
 
 For either mode, private file export is also available:
 
@@ -113,7 +115,7 @@ sudo twinlink forward export web --output /root/twinlink-transfer/web.pair
 sudo scp /root/twinlink-transfer/web.pair root@VPS2:/root/twinlink-transfer/web.pair
 ```
 
-Create the mode-0700 transfer directory on VPS2 first. Forward export files are mode 0600 and can contain rathole tokens. Keep exports and Rathole pairing text out of public backups and version control. The wizard accepts pasted text without putting it into shell history; CLI scripts can use `rathole pair-import --file PATH` with private file permissions. Transfer `app` rather than `web` if using the rathole example. On VPS2, preview and import:
+Create the mode-0700 transfer directory on VPS2 first. Forward export files are mode 0600 and can contain rathole tokens. Keep exports and Rathole pairing text out of public backups and version control. The wizard accepts pasted text without putting it into shell history; CLI scripts can use `forward pair-import --file PATH` with private file permissions. Transfer `app` rather than `web` if using the rathole example. On VPS2, preview and import:
 
 ```sh
 sudo twinlink forward import --file /root/twinlink-transfer/web.pair

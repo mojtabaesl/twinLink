@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from twinlink import cli
+from twinlink import cli, pairing
 from twinlink.models import empty_state
 from twinlink.store import Store
 from tests.test_engine import MemoryHost, active_state
@@ -351,6 +351,100 @@ class CLITests(unittest.TestCase):
         self.assertEqual(entry["rathole_group"], "my-rathole")
         self.assertEqual(entry["transport_port"], 2444)
         self.assertEqual(len(prompts), 5)
+
+    def test_unified_forward_add_uses_one_rathole_config_and_preserves_preview(self):
+        self.create_verified_gre()
+        command = ["forward", "add", "app", "--mode", "rathole", "--tunnel", "edge", "--ports", "8080:80,8443:443"]
+        with patch.object(cli.rathole, "generate_keypair", return_value=KEYS):
+            code, result = self.invoke(command)
+            self.assertEqual(code, 0, result)
+            self.assertEqual(result["action"], "forward add")
+            self.assertNotIn("pairing_code", result)
+            self.assertNotIn(PRIVATE, json.dumps(result))
+            self.assertFalse(self.store.read()["forwards"])
+            code, result = self.invoke(command + ["--apply", "--yes"])
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["plan"]["action"], "forward add")
+        self.assertTrue(result["pairing_code"].startswith("r1."))
+        self.assertEqual(len(list((self.state_dir / "rathole").glob("*.toml"))), 1)
+        self.assertEqual(self.store.read()["forwards"]["app-8080"]["destination_address"], "127.0.0.1")
+        code, config = self.invoke(["forward", "config", "app"])
+        self.assertEqual(code, 0, config)
+        self.assertEqual(config["path"], str(self.state_dir / "rathole/app.toml"))
+        code, exported = self.invoke(["forward", "pair-export", "app"])
+        self.assertEqual(code, 0, exported)
+        self.assertEqual(exported["code"], result["pairing_code"])
+
+    def test_unified_kernel_add_and_peer_pairing_preview_apply_and_enable(self):
+        self.create_verified_gre()
+        code, added = self.invoke(ADD + ["--apply", "--yes"])
+        self.assertEqual(code, 0, added)
+        self.assertTrue(added["pairing_code"].startswith("f1."))
+        code, exported = self.invoke(["forward", "pair-export", "web"])
+        self.assertEqual(exported["code"], added["pairing_code"])
+        self.assertFalse(exported["contains_secret"])
+        state = empty_state()
+        state["tunnels"]["edge"] = pairing.import_tunnel(pairing.export_tunnel(self.store.read()["tunnels"]["edge"]))
+        state["tunnels"]["edge"].update(verified=True, running=True, enabled=True)
+        self.store.write(state)
+        self.host = MemoryHost(self.state_dir, self.unit_dir)
+        self.host.address_data[0]["addr_info"][0]["local"] = "203.0.113.2"
+        code, result = self.invoke(["tunnel", "reapply", "edge", "--apply", "--yes"])
+        self.assertEqual(code, 0, result)
+        command = ["forward", "pair-import", "--code", added["pairing_code"], "--enable"]
+        code, result = self.invoke(command)
+        self.assertEqual(code, 0, result)
+        self.assertFalse(self.store.read()["forwards"])
+        code, result = self.invoke(command + ["--apply", "--yes"])
+        self.assertEqual(code, 0, result)
+        entry = self.store.read()["forwards"]["web"]
+        self.assertEqual(entry["side"], "vps2")
+        self.assertEqual(entry["bind_address"], "198.51.100.1")
+        self.assertTrue(entry["running"])
+        self.assertTrue(entry["enabled"])
+
+    def test_unified_pair_import_detects_rathole_and_keeps_private_keys_off_peer(self):
+        source, peer = noise_pair()
+        code_text = pairing.export_rathole(list(source["forwards"].values()), source)
+        self.store.write(peer)
+        with patch.object(cli.rathole, "generate_keypair") as generate:
+            code, result = self.invoke(["forward", "pair-import", "--code", code_text, "--apply", "--yes"])
+            generate.assert_not_called()
+        self.assertEqual(code, 0, result)
+        for entry in self.store.read()["forwards"].values():
+            self.assertNotIn("noise_private_key", entry)
+            self.assertFalse(entry["running"])
+
+    def test_unified_batch_rejects_conflicting_options_without_mutating(self):
+        self.create_verified_gre()
+        command = ["forward", "add", "app", "--tunnel", "edge", "--ports", "8080:80"]
+        for options in (["--mode", "kernel"], ["--mode", "rathole", "--bind-port", "8080"],
+                        ["--mode", "rathole", "--protocol", "udp"], ["--mode", "rathole", "--rathole-transport", "tcp"]):
+            with self.subTest(options=options), patch.object(cli.rathole, "generate_keypair") as generate:
+                code, result = self.invoke(command + options + ["--apply", "--yes"])
+                self.assertEqual(code, 1, result)
+                self.assertFalse(self.store.read()["forwards"])
+                generate.assert_not_called()
+
+    def test_unified_install_previews_and_missing_single_port_options_report_error(self):
+        with patch.object(cli.rathole, "install_plan", return_value={"path": "/opt/rathole"}), patch.object(cli.rathole, "install") as install:
+            code, result = self.invoke(["forward", "install-rathole"])
+            self.assertEqual(code, 0, result)
+            install.assert_not_called()
+        code, result = self.invoke(["forward", "add", "web", "--tunnel", "edge", "--mode", "kernel"])
+        self.assertEqual(code, 1, result)
+        self.assertIn("--bind-port", result["error"])
+        self.assertFalse(self.state_dir.exists())
+
+    def test_common_setup_accepts_kernel_without_installation_or_retyping_endpoints(self):
+        self.create_verified_gre()
+        answers = iter(["web", "", "0", "10.20.30.40", "8080", "80", "apply"])
+        with patch("builtins.input", side_effect=lambda prompt: next(answers)), patch("twinlink.menu._Menu._install_rathole") as install:
+            code, result = self.invoke(["forward", "setup", "--mode", "kernel"], parse_json=False)
+            install.assert_not_called()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(self.store.read()["forwards"]["web"]["mode"], "kernel")
+        self.assertIn('"pairing_code": "f1.', result)
 
 
 if __name__ == "__main__":

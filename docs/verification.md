@@ -8,18 +8,18 @@ Verified on 16 October 2026 on the development Mac (Darwin arm64), with Python 3
 2. GRE lifecycle, actual kernel inspection, reachability health, drift detection, diagnostics, and systemd persistence.
 3. Rathole 0.5.0 installation, shared Noise configs/processes, native key generation, named connection-port setup, legacy consolidation, base64 pairing and service management; nftables TCP/UDP forwarding, relay ranges, return NAT, and scoped conntrack cleanup.
 4. Preview/apply/read-back/commit transactions, ownership protection, locks, durable rollback and interrupted-transaction recovery.
-5. Guided menu, scriptable JSON CLI, executable archive, distribution installer/uninstaller, operator documentation, and Linux integration suite/CI.
+5. Two main menu workflows for GRE tunnels and Forwarding, shared Kernel/Rathole setup and pairing under `forward`, scriptable JSON CLI, executable archive, distribution installer/uninstaller, operator documentation, and Linux integration suite/CI.
 
 ## Checks actually run
 
 | Check | Result |
 | --- | --- |
-| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` | 213 collected: **205 passed, 8 skipped**. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` | 224 collected: **216 passed, 8 skipped**. |
 | Linux namespace tests collected by the full suite | All 8 skipped: Linux/root networking environment unavailable; integration opt-in absent. |
 | `sh -n scripts/install.sh scripts/uninstall.sh` | Passed. |
 | Python AST parsing | All 26 Python source files parsed. Unit tests import all implementation modules. |
 | `python3 scripts/package.py install --build-only dist/twinlink.pyz` | Built the executable archive. |
-| Packaged runtime smoke | Shared-config add preview passed with temporary installation paths and a mocked native key generator: one TOML/connection port, two service sections, one default token, redacted credentials, and unchanged saved state. Packaging tests cover success/error exit codes. |
+| Packaged runtime smoke | Help and the direct Forwarding menu passed. Both Kernel and shared Rathole add previews passed with temporary paths and a fixture native key generator: correct forwarding modes, grouped Rathole services, redacted credentials, no pairing code before apply, and unchanged saved state. Packaging tests cover success/error exit codes. |
 | `git diff --check` | Passed. |
 
 The unit suite uses a stateful simulated kernel for transaction tests. It checks failures, read-back mismatches, partial rollback, journal recovery, ownership refusals, real versus desired state, peer verification gates, listener conflicts, secondary binds, private-subnet route protection, secret redaction, revision edits, cascade deletion, and rathole's initial pending-peer state. It does not establish packet delivery.
@@ -29,6 +29,8 @@ New tests cover several forwarding ports in one Noise pairing code, matching tok
 Saved-state setup tests additionally cover automatic role/single-tunnel selection, numbered choices for multiple tunnels and known public/private/backend addresses, custom backend entry, reuse/export of existing forwarding, bounded generated service names, explicit Rathole name/connection-port prompts, client pairing without a tunnel selector, mixed-role selection, custom state paths, unavailable-tunnel repair guidance, invalid state, and a complete setup apply using a real private state file with the simulated kernel.
 
 Shared-process tests cover one config/unit/port/token/keypair for multiple services, independent stop/delete with sibling listeners preserved, one restart per group, boot restoration omitting disabled services, rollback after restart failure, consolidation removing obsolete configs/units, atomic peer group import and connection-port updates, whole-group export and shared-setting/port conflict rejection. Existing per-entry configurations remain compatible until explicitly consolidated.
+
+Unified-forwarding checks cover the two-task main menu, both setup methods under Forwarding, saved GRE reuse for Kernel UDP/ranges, Kernel pairing without Rathole installation or method selection on VPS2, shared config/editor paths, invalid-code errors, `forward add --mode rathole --ports` preview/apply, common pairing export/import with peer enablement, private-key exclusion, conflicting batch-option rejection and compatibility of existing Rathole commands.
 
 ## Linux checks supplied but not executed here
 
