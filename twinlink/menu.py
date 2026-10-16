@@ -292,7 +292,9 @@ class _Menu:
         self.execute(command, mutation=True)
 
     def import_tunnel(self):
-        command = ["tunnel", "pair-import", "--file", self.prompt("GRE pairing file received from the other server", required=True)]
+        from . import pairing
+        source = self.prompt("Paste GRE pairing text (v1.…), or enter a file path", required=True)
+        command = ["tunnel", "pair-import", "--code" if source.startswith(pairing.TUNNEL_PREFIX) else "--file", source]
         name = self.prompt("Local tunnel name (Enter to keep exported name)")
         if name:
             command.extend(("--name", name))
@@ -364,7 +366,7 @@ class _Menu:
         while True:
             selected = self.choice("GRE tunnels", (
                 ("1", "List tunnels and health"), ("2", "Create GRE tunnel"),
-                ("3", "Export GRE pairing code"), ("4", "Import GRE pairing file"),
+                ("3", "Export GRE pairing code"), ("4", "Import GRE pairing text or file"),
                 ("5", "Check peer and record successful verification"), ("6", "Diagnose tunnel"),
                 ("7", "Enable/disable/start/stop/restart/reapply/delete"), ("8", "Edit tunnel"), ("0", "Back")))
             if selected == "0":

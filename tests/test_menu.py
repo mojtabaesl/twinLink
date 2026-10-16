@@ -53,6 +53,34 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(applied, preview + ["--apply", "--yes"])
         self.assertEqual(preview[preview.index("--side") + 1], "vps1")
 
+    def test_gre_import_accepts_pasted_pairing_text_and_preserves_confirmation(self):
+        code = pairing.export_tunnel(tunnel())
+        calls, output = self.run_script(["1", "4", "  " + code + "  ", "peer", "y", "apply", "0", "0"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][-7:], ["tunnel", "pair-import", "--code", code, "--name", "peer", "--replace"])
+        self.assertEqual(calls[1], calls[0] + ["--apply", "--yes"])
+        self.assertNotIn(code, "\n".join(output))
+        self.assertIn("Import GRE pairing text or file", "\n".join(output))
+        self.assertTrue(any("Paste GRE pairing text" in prompt for prompt in self.prompts))
+
+    def test_gre_import_keeps_file_path_support_and_preview_cancellation(self):
+        calls, output = self.run_script(["1", "4", "/private/gre pairing.txt", "", "n", "", "0", "0"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-4:], ["tunnel", "pair-import", "--file", "/private/gre pairing.txt"])
+        self.assertIn("Preview only; no changes applied.", output)
+
+    def test_cancelled_gre_paste_does_not_invoke_cli(self):
+        calls, output = self.run_script(["1", "4", "!", "0", "0"])
+        self.assertFalse(calls)
+        self.assertIn("Operation cancelled.", output)
+
+    def test_failed_gre_paste_preview_does_not_request_apply(self):
+        code = pairing.export_tunnel(tunnel())
+        calls, _ = self.run_script(["1", "4", code, "", "n", "0", "0"], result=1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--code", calls[0])
+        self.assertFalse(any("Type apply" in prompt for prompt in self.prompts))
+
     def test_failed_preview_never_reaches_apply_confirmation(self):
         calls, _ = self.run_script(["3", "3", "0", "0"], result=1)
         self.assertEqual(len(calls), 1)

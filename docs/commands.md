@@ -45,6 +45,10 @@ twinlink --version
 | `twinlink tunnel pair-import --code CODE` | Decode a code, swap endpoints and side, and preview the peer tunnel. Applying starts/enables it but leaves it unverified. |
 | `twinlink tunnel pair-import --file PATH` | Read the pairing code from a file instead. |
 
+In `twinlink menu`, choose **GRE tunnels → Import GRE pairing text or file**
+and paste the complete `v1.…` pairing text directly. A file path also works.
+Review the preview and type `apply` to confirm.
+
 Tunnel creation requires `--side`, both public addresses, and both private addresses:
 
 ```sh
