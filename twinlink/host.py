@@ -98,7 +98,7 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
     """Redact both known secrets and token/password assignments in evidence."""
     if isinstance(value, dict):
         return {key: ("[REDACTED]" if any(word in key.lower() for word in
-                     ("token", "password", "secret")) else redact(item, secrets))
+                     ("token", "password", "secret", "private_key")) else redact(item, secrets))
                 for key, item in value.items()}
     if isinstance(value, list):
         return [redact(item, secrets) for item in value]
@@ -107,7 +107,7 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
     for secret in secrets:
         if secret:
             value = value.replace(secret, "[REDACTED]")
-    return re.sub(r'(?im)((?:token|password|secret)\s*[=:]\s*)("[^"\n]*"|\x27[^\x27\n]*\x27|[^\s,\n]+)',
+    return re.sub(r'(?im)((?:token|password|secret|private_key)\s*[=:]\s*)("[^"\n]*"|\x27[^\x27\n]*\x27|[^\s,\n]+)',
                   r'\1"[REDACTED]"', value)
 
 
@@ -688,4 +688,4 @@ class Host:
                 result["generated_config"] = Path(config_path).read_text()
             except OSError as exc:
                 result["generated_config_error"] = str(exc)
-        return redact(result, (str(entry.get("token", "")),))
+        return redact(result, (str(entry.get("token", "")), str(entry.get("noise_private_key", ""))))

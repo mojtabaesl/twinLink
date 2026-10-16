@@ -25,7 +25,7 @@ jobs:
           git -C /tmp/twinlink-rathole checkout --detach FETCH_HEAD
           # Its locked time 0.3.29 predates Rust 1.80's inference changes.
           rustup toolchain install 1.75.0 --profile minimal
-          cargo +1.75.0 build --manifest-path /tmp/twinlink-rathole/Cargo.toml --release --locked --no-default-features --features server,client
+          cargo +1.75.0 build --manifest-path /tmp/twinlink-rathole/Cargo.toml --release --locked --no-default-features --features server,client,noise
           /tmp/twinlink-rathole/target/release/rathole --version
       - name: Run unit tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v

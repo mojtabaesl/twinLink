@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import gzip
 import io
 import json
@@ -22,8 +23,9 @@ MAX_DECODED_SIZE = 65536
 MAX_CODE_SIZE = 131072
 TUNNEL_PREFIX = "v1."
 FORWARD_PREFIX = "f1."
+RATHOLE_PREFIX = "r1."
 _TUNNEL_FIELDS = ("name", "side", "local_public", "remote_public", "local_private", "remote_private", "key", "mtu", "ttl")
-_FORWARD_FIELDS = ("name", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "token", "transport_port", "relay_port", "revision")
+_FORWARD_FIELDS = ("name", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "token", "transport_port", "relay_port", "revision", "rathole_transport", "noise_public_key")
 
 
 def _encode(kind, payload):
@@ -31,7 +33,7 @@ def _encode(kind, payload):
     if len(body) > MAX_DECODED_SIZE:
         raise ValidationError("pairing payload is too large")
     framed = struct.pack(">I", zlib.crc32(body)) + gzip.compress(body, mtime=0)
-    prefix = TUNNEL_PREFIX if kind == "tunnel" else FORWARD_PREFIX
+    prefix = {"tunnel": TUNNEL_PREFIX, "forward": FORWARD_PREFIX, "rathole": RATHOLE_PREFIX}[kind]
     return prefix + base64.urlsafe_b64encode(framed).decode("ascii").rstrip("=")
 
 
@@ -52,7 +54,7 @@ def _decode(code, kind):
         raise ValidationError("pairing code is empty")
     if len(code) > MAX_CODE_SIZE:
         raise ValidationError("pairing code is too large")
-    prefix = TUNNEL_PREFIX if kind == "tunnel" else FORWARD_PREFIX
+    prefix = {"tunnel": TUNNEL_PREFIX, "forward": FORWARD_PREFIX, "rathole": RATHOLE_PREFIX}[kind]
     if not code.startswith(prefix):
         raise ValidationError(f"unsupported pairing type or version; expected {prefix}")
     encoded = code[len(prefix):]
@@ -137,7 +139,7 @@ def decode_forward(code):
     candidate = {**payload["forward"], "tunnel": tunnel["name"]}
     if candidate.get("mode") == "rathole" and not candidate.get("token"):
         raise ValidationError("rathole pairing is missing its matching service token")
-    entry = validate_forward(candidate, state, existing_name=candidate.get("name"))
+    entry = validate_forward(candidate, state, existing_name=candidate.get("name"), require_noise_private=False)
     return {"tunnel": tunnel, "forward": entry}
 
 
@@ -176,6 +178,10 @@ def import_forward(code, state, name=None):
         raise ValidationError("existing forwarding name belongs to a different tunnel")
     if existing and entry["revision"] < existing.get("revision", 1):
         raise ValidationError("forward pairing revision is older than the local configuration")
+    if entry.get("rathole_transport") == "noise" and tunnel["side"] == "vps1":
+        if not existing or existing.get("noise_public_key") != entry["noise_public_key"]:
+            raise ValidationError("Create Noise forwarding on VPS1 first; the server private key never leaves VPS1")
+        entry["noise_private_key"] = existing.get("noise_private_key")
     return validate_forward(entry, state, existing_name=entry["name"] if existing else None)
 
 
@@ -184,4 +190,31 @@ def preview_forward(code, state, name=None):
     if "token" in result:
         result["token"] = "<redacted>"
         result["contains_secret"] = True
+    if "noise_private_key" in result:
+        result["noise_private_key"] = "<redacted>"
     return result
+
+
+def export_rathole(entries, state):
+    """One explicit secret code for several forwards, without server private keys."""
+    if not 1 <= len(entries) <= 64 or any(entry["mode"] != "rathole" for entry in entries):
+        raise ValidationError("Rathole pairing requires 1–64 Rathole forwarding entries")
+    if len({entry["name"] for entry in entries}) != len(entries):
+        raise ValidationError("Duplicate Rathole forwarding names")
+    codes = [export_forward(entry, state["tunnels"][entry["tunnel"]]) for entry in entries]
+    return _encode("rathole", {"forwards": codes})
+
+
+def import_rathole(code, state):
+    payload = _decode(code, "rathole")
+    if set(payload) != {"version", "kind", "forwards"} or not isinstance(payload["forwards"], list) or not 1 <= len(payload["forwards"]) <= 64:
+        raise ValidationError("Invalid Rathole pairing bundle")
+    candidate = copy.deepcopy(state)
+    records = []
+    for item in payload["forwards"]:
+        record = import_forward(item, candidate)
+        if record["mode"] != "rathole" or any(existing["name"] == record["name"] for existing in records):
+            raise ValidationError("Rathole pairing contains a duplicate name or a non-Rathole forward")
+        candidate["forwards"][record["name"]] = record
+        records.append(record)
+    return records

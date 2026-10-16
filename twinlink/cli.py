@@ -5,19 +5,21 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import sys
 
 from . import __version__
 from .engine import ApplyError, Engine, redacted
 from .host import Host, HostError
 from .models import ValidationError, validate_tunnel, validate_forward
-from . import pairing
+from . import pairing, rathole
+from .render import rathole_config_path
 from .store import Store, StateError, reject_symlink
 
 
 LIFECYCLE = ("enable", "disable", "start", "stop", "restart", "reapply", "delete")
 TUNNEL_FIELDS = ("side", "local_public", "remote_public", "local_private", "remote_private", "key", "mtu", "ttl")
-FORWARD_FIELDS = ("tunnel", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "relay_port", "transport_port")
+FORWARD_FIELDS = ("tunnel", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "relay_port", "transport_port", "rathole_transport")
 
 
 def output(value, as_json=False):
@@ -43,7 +45,7 @@ def build_parser():
     parser.add_argument("--state-dir", default="/var/lib/twinlink", help="Private configuration and journal directory")
     parser.add_argument("--unit-dir", default="/etc/systemd/system", help="Managed unit directory")
     parser.add_argument("--runtime-path", default="/usr/local/libexec/twinlink-runtime", help="Absolute installed runtime used by units")
-    parser.add_argument("--rathole-binary", default="/usr/local/bin/rathole", help="Operator-supplied rathole 0.5.0 executable")
+    parser.add_argument("--rathole-binary", default="/usr/local/bin/rathole", help="Rathole 0.5.0 executable/install path")
     parser.add_argument("--no-systemd", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="group", required=True)
     for group in ("tunnel", "forward"):
@@ -80,6 +82,8 @@ def build_parser():
                     kwargs["choices"] = ("kernel", "rathole")
                 elif field == "protocol":
                     kwargs["choices"] = ("tcp", "udp")
+                elif field == "rathole_transport":
+                    kwargs["choices"] = ("noise", "tcp")
                 required = action in ("create", "add") and field in (("side", "local_public", "remote_public", "local_private", "remote_private") if group == "tunnel" else ("tunnel", "mode", "bind_port", "destination_address", "destination_port"))
                 leaf.add_argument("--" + field.replace("_", "-"), required=required, **kwargs)
             if action in ("create", "add"):
@@ -107,6 +111,33 @@ def build_parser():
             imp.add_argument("--file", required=True)
             imp.add_argument("--name")
             mutation_flags(imp)
+    rathole_parser = commands.add_parser("rathole", help="Install and set up encrypted Rathole forwarding over verified GRE")
+    rathole_actions = rathole_parser.add_subparsers(dest="action", required=True)
+    install = rathole_actions.add_parser("install", help="Install the pinned official release; reuse a compatible binary")
+    install.add_argument("--sha256", help="Optional trusted SHA256 of the release ZIP archive")
+    mutation_flags(install)
+    setup = rathole_actions.add_parser("setup", help="Guided installation, ports, Noise credentials and base64 pairing")
+    setup.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    config = rathole_actions.add_parser("config", help="Print config paths/editor commands without launching an editor")
+    config.add_argument("name")
+    config.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    add = rathole_actions.add_parser("add", help="Create one or more Noise forwards in one transaction on VPS1")
+    add.add_argument("name", help="Name, or name prefix for multiple ports")
+    add.add_argument("--tunnel", required=True)
+    add.add_argument("--ports", required=True, help="PUBLIC:DESTINATION pairs, e.g. 8080:80,8443:443; 9000 keeps the same port")
+    add.add_argument("--destination-address", default="127.0.0.1")
+    add.add_argument("--bind-address")
+    add.add_argument("--disabled", action="store_true")
+    mutation_flags(add)
+    export = rathole_actions.add_parser("pair-export", help="Explicitly print a base64 pairing code containing service tokens")
+    export.add_argument("names", nargs="+")
+    export.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    imp = rathole_actions.add_parser("pair-import", help="Import a base64 Rathole pairing code")
+    source = imp.add_mutually_exclusive_group(required=True)
+    source.add_argument("--code")
+    source.add_argument("--file")
+    imp.add_argument("--enable", action="store_true", help="Start imported forwards and enable at boot")
+    mutation_flags(imp)
     for name in ("doctor", "status", "menu"):
         leaf = commands.add_parser(name)
         leaf.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -149,9 +180,29 @@ def _stop_dependents(state, name, disable=False):
 
 
 def prepare(args, old):
-    """Pure desired-state mutation. Never runs commands or stores secrets."""
+    """Prepare desired state; native key generation changes no networking/files."""
     new = copy.deepcopy(old)
     group, action = args.group, getattr(args, "action", "")
+    if group == "rathole":
+        if action == "add":
+            mappings = rathole.port_mappings(args.ports)
+            names = rathole.forward_names(args.name, mappings)
+            for name, (public, destination) in zip(names, mappings):
+                options = argparse.Namespace(**{**vars(args), "group": "forward", "action": "add", "name": name,
+                                               "mode": "rathole", "protocol": "tcp", "rathole_transport": "noise",
+                                               "bind_port": str(public), "destination_port": str(destination)})
+                new = prepare(options, new)
+            return new
+        if action == "pair-import":
+            code = args.code if args.code is not None else _read_transfer(args.file, secret=True)
+            records = pairing.import_rathole(code, new)
+            for record in records:
+                if args.enable:
+                    if not new["tunnels"][record["tunnel"]]["running"]:
+                        raise ValidationError("Start the GRE tunnel before enabling imported forwarding")
+                    record.update(enabled=True, running=True)
+                new["forwards"][record["name"]] = record
+            return new
     if group == "uninstall":
         if not args.purge_managed:
             raise ValidationError("Program-only removal: run scripts/uninstall.sh; --purge-managed explicitly removes network resources")
@@ -180,6 +231,16 @@ def prepare(args, old):
                 _stop_dependents(new, args.name, disable=True)
             value = validate_tunnel(record, new, existing_name=args.name if existing else None)
         else:
+            if record.get("mode") == "rathole":
+                if action == "add":
+                    record.setdefault("rathole_transport", "noise")
+                if record.get("rathole_transport") == "noise" and not record.get("noise_public_key"):
+                    validated = validate_forward({**record, "rathole_transport": "tcp"}, new,
+                                                 existing_name=args.name if existing else None)
+                    if validated["side"] != "vps1":
+                        raise ValidationError("Create Noise forwarding on VPS1, then import its pairing code on VPS2")
+                    record["token"] = validated["token"]
+                    record.update(rathole.generate_keypair(args.rathole_binary))
             if action == "edit":
                 if record["tunnel"] != existing["tunnel"] or record["mode"] != existing["mode"]:
                     raise ValidationError("Tunnel association and mode are stable; delete/recreate the entry to change them")
@@ -240,8 +301,11 @@ def inspect_record(args, state, host, engine, record):
             if record["mode"] == "kernel" and expected and expected != engine.nft_fingerprint():
                 status.setdefault("drift", []).append({"field": "nftables", "reason": "Installed table differs from the verified commit"})
                 status.update(health="degraded", reason="Managed firewall rules drifted; run forward reapply " + record["name"])
-        return {"configuration": redacted(record), "operational": status,
-                "peer_transfer_required": args.group == "forward" and record.get("peer_revision") != record.get("revision")}
+        result = {"configuration": redacted(record), "operational": status,
+                  "peer_transfer_required": args.group == "forward" and record.get("peer_revision") != record.get("revision")}
+        if args.group == "forward" and record["mode"] == "rathole":
+            result["config"] = config_instructions(args, record["name"])
+        return result
     except (HostError, ApplyError, OSError) as exc:
         return {"configuration": redacted(record), "operational": {"health": "unknown", "reason": str(exc)}}
 
@@ -258,6 +322,18 @@ def _confirm(args):
 def interactive(base_args):
     from .menu import run_menu
     return run_menu(base_args)
+
+
+def config_instructions(args, name):
+    path = rathole_config_path(name, str(Path(args.state_dir).absolute()))
+    base = ["sudo", "twinlink", "--state-dir", str(Path(args.state_dir).absolute()),
+            "--unit-dir", args.unit_dir, "--runtime-path", args.runtime_path,
+            "--rathole-binary", args.rathole_binary]
+    return {"path": path, "edit_with_vim": shlex.join(["sudo", "vim", path]),
+            "edit_with_nano": shlex.join(["sudo", "nano", path]),
+            "restart_after_manual_edit": shlex.join(["sudo", "systemctl", "restart", f"twinlink-rathole-{name}.service"]),
+            "persistent_changes": shlex.join(base + ["forward", "edit", name, "--help"]),
+            "note": "Generated TOML: manual edits are overwritten on reapply or boot restore. Use forward edit for persistent port/address changes; export/import shared changes again."}
 
 
 def _internal(args, store, host, engine):
@@ -304,6 +380,21 @@ def main(argv=None):
                         rathole_binary=args.rathole_binary, systemd=not args.no_systemd)
         if args.group == "menu":
             return interactive(args)
+        if args.group == "rathole" and args.action == "setup":
+            from .menu import run_rathole_setup
+            return run_rathole_setup(args)
+        if args.group == "rathole" and args.action == "install":
+            plan = rathole.install_plan(args.rathole_binary, args.sha256)
+            if not args.apply:
+                output({**plan, "next": "Repeat with --apply to install Rathole"}, args.json)
+                return 0
+            _confirm(args)
+            host.require_linux_root()
+            with store.lock():
+                if store.journal.exists():
+                    raise StateError("Recover the interrupted transaction before installing Rathole")
+                output(rathole.install(args.rathole_binary, args.sha256), args.json)
+            return 0
         if args.group == "doctor":
             report = host.dependency_report()
             report["platform"] = platform.system()
@@ -322,6 +413,20 @@ def main(argv=None):
                 output(engine.recover(), args.json)
             return 0
         state = store.read()
+        if args.group == "rathole" and args.action == "config":
+            record = _get(state, "forward", args.name)
+            if record["mode"] != "rathole":
+                raise ValidationError("This forwarding entry does not use Rathole")
+            output(config_instructions(args, record["name"]), args.json)
+            return 0
+        if args.group == "rathole" and args.action == "pair-export":
+            records = [_get(state, "forward", name) for name in args.names]
+            code = pairing.export_rathole(records, state)
+            if args.json:
+                output({"code": code, "contains_secret": True, "contains_noise_private_key": False}, True)
+            else:
+                print(code)
+            return 0
         if args.group == "status":
             result = {"version": __version__, "unfinished_transaction": store.journal.exists(), "tunnels": [], "forwards": []}
             for group, key in (("tunnel", "tunnels"), ("forward", "forwards")):
@@ -337,7 +442,7 @@ def main(argv=None):
                     "purge": "uninstall --purge-managed --cascade --apply --yes removes managed network resources first"}, args.json)
             return 0
         action = getattr(args, "action", "")
-        if action in ("list", "show", "check", "diagnose"):
+        if args.group != "rathole" and action in ("list", "show", "check", "diagnose"):
             if action == "list":
                 key = "tunnels" if args.group == "tunnel" else "forwards"
                 output([inspect_record(args, state, host, engine, r) for r in state[key].values()], args.json)
@@ -385,6 +490,13 @@ def main(argv=None):
             return 0
         else:
             candidate = prepare(args, state)
+        setup_pairing = None
+        setup_names = []
+        if args.group == "rathole" and action == "add":
+            setup_names = rathole.forward_names(args.name, rathole.port_mappings(args.ports))
+            # Check export bounds before the transaction, so a successful
+            # commit cannot subsequently fail to produce its pairing code.
+            setup_pairing = pairing.export_rathole([candidate["forwards"][name] for name in setup_names], candidate)
         force = action in ("reapply", "restart")
         if force:
             # Persisted metadata is excluded from model fields; force runtime diff
@@ -403,6 +515,10 @@ def main(argv=None):
         _confirm(args)
         with store.lock():
             result = engine.apply(state, candidate, plan)
+        if setup_pairing is not None:
+            result["pairing_code"] = setup_pairing
+            result["pairing_note"] = "Secret base64 text: paste into twinlink rathole setup on VPS2. Contains service tokens and Noise public keys; no server private keys. Base64 is not encryption."
+            result["configs"] = [config_instructions(args, name) for name in setup_names]
         output({**result, "plan": plan} if args.json else result, args.json)
         return 0
     except (ValidationError, StateError, HostError, ApplyError, OSError, ValueError) as exc:

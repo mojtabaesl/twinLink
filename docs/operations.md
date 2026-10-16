@@ -18,14 +18,14 @@ sudo twinlink menu
 
 The installer installs `iproute2`/`iproute`, `nftables`, `conntrack`, and ICMP diagnostics. `--skip-deps` checks existing dependencies without changing packages. It builds the local checkout as a zipapp, installs a launcher at `/usr/local/bin/twinlink`, and keeps the runtime at `/usr/local/libexec/twinlink-runtime`. Managed systemd units use that runtime directly. No pip dependencies are needed.
 
-Rathole is optional and is obtained separately. The supported version is **0.5.0**, with TCP services only. Select a trusted executable and, preferably, compare its SHA256 with a checksum obtained from the publisher over a trusted channel:
+Rathole is optional. The supported version is **0.5.0**, with TCP services and Noise encryption. The setup wizard can install it automatically. To use a separately obtained executable instead, select a trusted binary and, preferably, compare its SHA256 with a trusted checksum:
 
 ```sh
 sudo scripts/install.sh --rathole /opt/rathole/rathole --rathole-sha256 TRUSTED_SHA256
 sudo twinlink --rathole-binary /opt/rathole/rathole doctor
 ```
 
-The installer checks this supplied executable; it does not download or overwrite rathole. Pass `--rathole-binary` consistently for operations that generate rathole units. The default is `/usr/local/bin/rathole`.
+The source installer checks this supplied executable. Alternatively, `sudo twinlink rathole install --apply` downloads the official pinned release for Linux x86_64/ARM64, checks its version and Noise support, and installs it without overwriting an existing binary. Add `--sha256 HASH` for a trusted ZIP checksum. Pass `--rathole-binary` consistently when using a custom path. The default is `/usr/local/bin/rathole`.
 
 Build without installing anything, including on a development Mac:
 
@@ -88,7 +88,9 @@ sudo twinlink forward add web --tunnel edge --mode kernel --protocol tcp \
 
 The destination must be reachable from VPS2. Applying `forward add` normally starts/enables the local entry; use `--disabled` to store it inactive while arranging peer setup. The public bind may be VPS1's primary or secondary assigned address, or `0.0.0.0`; the engine validates assignment on VPS1. Kernel mode first translates VPS1's public tuple to a dedicated relay port on VPS2's GRE address, then translates that relay tuple to the backend on VPS2. It supplies return-path NAT without installing a backend route or altering a default route. The relay port is allocated deterministically; `--relay-port` can set a nonconflicting port or equal-sized range explicitly. A range such as `8000-8010` maps to a matching destination range, or to one fixed destination port. Use `--protocol udp` for UDP kernel forwarding.
 
-For rathole TCP instead:
+For guided Rathole with Noise, after verifying GRE on both ends, run `sudo twinlink rathole setup` on both servers. Choose create on VPS1 and supply a name/prefix, GRE name, backend address and ports such as `8080:80,8443:443`. The wizard installs Rathole if missing and generates tokens/keypairs. It applies the port batch together and prints one `r1.` base64 pairing code. Choose paste on VPS2, paste that code, review/apply, and the matching client forwards start and enable at boot. No manual credential/config editing is required. Pairing text contains service tokens; transfer it privately. Noise server private keys never leave VPS1.
+
+For one scriptable Rathole TCP forward instead (Noise is the default for new records):
 
 ```sh
 sudo twinlink --rathole-binary /opt/rathole/rathole forward add app \
@@ -99,7 +101,9 @@ sudo twinlink --rathole-binary /opt/rathole/rathole forward add app \
 
 Rathole runs a server on VPS1 and a client on VPS2. During first setup, VPS1 can commit its private connection listener while reporting `pending_peer`; its public service listener appears after the matching VPS2 client authenticates. A committed local setup is not a claim of forwarding health. This behavior follows the [selected upstream server implementation](https://github.com/rathole-org/rathole/blob/v0.5.0/src/server.rs). Its connection listener binds only to VPS1's private GRE address. Its public service listener uses the selected bind address and port. Each entry receives a strong token and a matching service name. `--transport-port` can override the private connection port if needed. Loopback backends are available in rathole mode because the client connects locally on VPS2.
 
-For either mode, explicitly export the matching configuration to a private file and transfer it over an authenticated private channel:
+Rathole can also use `sudo twinlink rathole pair-export app` and paste the resulting code into `rathole setup` on the peer. After shared edits, generate/import a fresh code. To inspect paths without opening an editor, use `sudo twinlink rathole config app`; the default file is `/var/lib/twinlink/rathole/app.toml`, editable with `sudo vim /var/lib/twinlink/rathole/app.toml`. Manual edits are regenerated on reapply/boot restore; use `forward edit` for persistent changes.
+
+For either mode, private file export is also available:
 
 ```sh
 sudo install -d -m 700 /root/twinlink-transfer
@@ -107,7 +111,7 @@ sudo twinlink forward export web --output /root/twinlink-transfer/web.pair
 sudo scp /root/twinlink-transfer/web.pair root@VPS2:/root/twinlink-transfer/web.pair
 ```
 
-Create the mode-0700 transfer directory on VPS2 first. Forward export files are mode 0600 and can contain rathole tokens. Do not put them in chat, shell arguments, public backups or version control. Transfer `app` rather than `web` if using the rathole example. On VPS2, preview and import:
+Create the mode-0700 transfer directory on VPS2 first. Forward export files are mode 0600 and can contain rathole tokens. Keep exports and Rathole pairing text out of public backups and version control. The wizard accepts pasted text without putting it into shell history; CLI scripts can use `rathole pair-import --file PATH` with private file permissions. Transfer `app` rather than `web` if using the rathole example. On VPS2, preview and import:
 
 ```sh
 sudo twinlink forward import --file /root/twinlink-transfer/web.pair

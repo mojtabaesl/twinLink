@@ -184,10 +184,14 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
             plan = self.engines[side].plan(old, new, action)
             return self.engines[side].apply(old, new, plan, boot=boot)
 
-    def _add_forward(self, mode="kernel", protocol="tcp", public="18080", destination="28080"):
+    def _add_forward(self, mode="kernel", protocol="tcp", public="18080", destination="28080", noise=False):
+        credentials = {}
+        if noise:
+            from twinlink.rathole import generate_keypair
+            credentials = {"rathole_transport": "noise", **generate_keypair(self.engines["vps1"].rathole_binary)}
         for side in self.hosts:
             new = self.stores[side].read()
-            spec = validate_forward({"name": "web", "tunnel": "edge", "side": side, "mode": mode, "protocol": protocol, "bind_address": "198.18.0.1", "bind_port": public, "destination_address": "10.81.0.2", "destination_port": destination, "relay_port": "31000", "transport_port": 24001, "token": "integration-secret-service-0123456789", "enabled": True, "running": True}, new)
+            spec = validate_forward({"name": "web", "tunnel": "edge", "side": side, "mode": mode, "protocol": protocol, "bind_address": "198.18.0.1", "bind_port": public, "destination_address": "10.81.0.2", "destination_port": destination, "relay_port": "31000", "transport_port": 24001, "token": "integration-secret-service-0123456789", "enabled": True, "running": True, **credentials}, new)
             new["forwards"]["web"] = spec
             self._apply(side, new, "add forwarding")
 
@@ -337,11 +341,17 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
         self._assert_foreign_unchanged()
 
     def test_rathole_tcp_external_request_edit_disable_restart_delete_and_restore(self):
+        self._rathole_lifecycle()
+
+    def test_rathole_noise_external_request_edit_disable_restart_delete_and_restore(self):
+        self._rathole_lifecycle(noise=True)
+
+    def _rathole_lifecycle(self, noise=False):
         binary = os.environ.get("TWINLINK_RATHOLE_BINARY") or shutil.which("rathole")
         if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
             self.skipTest("set TWINLINK_RATHOLE_BINARY to an executable rathole binary")
         self._echo()
-        self._add_forward(mode="rathole")
+        self._add_forward(mode="rathole", noise=noise)
 
         def start_pair():
             pair = []

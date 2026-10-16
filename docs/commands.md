@@ -101,9 +101,47 @@ sudo twinlink forward add web --tunnel edge --mode kernel --protocol tcp \
 | `--destination-port PORT_OR_RANGE` | Required for add: backend port. Kernel ranges must match the bind width, or use one fixed destination port. |
 | `--relay-port PORT_OR_RANGE` | Kernel only: override the automatically allocated private relay port/range. Width must match the bind range. |
 | `--transport-port PORT` | Rathole only: override the automatically chosen private connection port. |
+| `--rathole-transport noise\|tcp` | Rathole only: new CLI forwards default to Noise; existing records retain TCP until explicitly changed on VPS1 and paired again. |
 | `--disabled` | Add only: store without starting or enabling at boot. |
 
 Forward import accepts `--name NAME` for a local name override. Rathole service names must remain identical on both hosts. Transfer files must have private permissions (`chmod 600 PATH`).
+
+## Rathole installation, Noise and base64 pairing
+
+All Rathole forwards run over a verified GRE tunnel. Create Noise forwards on VPS1, then import the pairing text on VPS2. New Noise credentials are generated with the native `rathole --genkey`; tokens are generated automatically. Server private keys are kept only on VPS1.
+
+| Command | Explanation |
+| --- | --- |
+| `twinlink rathole setup` | Guided setup on either side: installation if missing, port prompts or pasted base64 text, preview/apply, and config paths. Also available from main menu option 7. |
+| `twinlink rathole install` | Preview installation of the official pinned 0.5.0 Linux x86_64/ARM64 release at `--rathole-binary`. Add `--apply` to download/install; compatible binaries are reused. |
+| `twinlink rathole install --sha256 HASH --apply` | Verify the downloaded ZIP archive against an optional trusted SHA256. This differs from the source installer's executable checksum. |
+| `twinlink rathole add NAME --tunnel TUNNEL --ports PORTS` | Preview a batch of Noise forwards on VPS1; add `--apply` to configure/start and enable at boot. Successful apply prints a single secret base64 pairing code. |
+| `twinlink rathole pair-export NAME [NAME ...]` | Print one `r1.` base64 code for up to 64 existing Rathole forwards. Includes tokens, ports, GRE parameters and public keys; excludes server private keys. |
+| `twinlink rathole pair-import --code CODE` | Decode and preview the peer forwards. Add `--apply` to store stopped, or `--enable --apply` to start and enable at boot. Use the wizard to paste without putting credentials in shell history. |
+| `twinlink rathole pair-import --file PATH` | Read pairing text from a private mode-0600 file instead. |
+| `twinlink rathole config NAME` | Print the exact TOML path, quoted vim/nano commands and restart command. Never opens an editor. |
+
+Batch options: `--destination-address` defaults to `127.0.0.1` on VPS2; `--bind-address` defaults to VPS1's public endpoint; `--disabled` stores stopped/disabled forwards. `--ports 8080:80,8443:443,9000` creates three entries named `NAME-8080`, `NAME-8443`, and `NAME-9000`. One mapping uses `NAME` unchanged. Port/name conflicts fail the whole batch before applying.
+
+```sh
+# On both hosts, install once (the wizard also handles this):
+sudo twinlink rathole install --apply
+
+# On VPS1, using an already verified GRE tunnel:
+sudo twinlink rathole add app --tunnel edge \
+  --destination-address 127.0.0.1 --ports 8080:80,8443:443 --apply
+
+# Copy the pairing_code from the result; on VPS2 paste it into this wizard:
+sudo twinlink rathole setup
+
+# Re-export after shared edits:
+sudo twinlink rathole pair-export app-8080 app-8443
+sudo twinlink rathole config app-8080
+```
+
+The pairing text contains authentication tokens. Base64 and the corruption checksum provide no confidentiality or sender authentication. Transfer it privately. Routine status, diagnostics and previews redact tokens/private keys; setup results and explicit pairing exports intentionally show the transfer code.
+
+Default generated TOML path: `/var/lib/twinlink/rathole/NAME.toml`. `sudo vim /var/lib/twinlink/rathole/NAME.toml` edits it manually; reapply/boot restore regenerate it from saved state. For persistent changes, use `forward edit NAME ... --apply`, re-export/import and enable on both sides. Upgrade legacy TCP on VPS1 with `forward edit NAME --rathole-transport noise --apply`, then pair again.
 
 ## Lifecycle commands
 

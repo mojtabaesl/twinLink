@@ -14,13 +14,14 @@ Client → VPS1 (public port) → GRE tunnel → VPS2 → Backend service
 
 - **GRE tunnels:** create, pair, monitor, and manage multiple tunnels.
 - **Two forwarding modes:** kernel TCP/UDP forwarding with port ranges of up to 256 ports, or rathole TCP forwarding with support for local services on VPS2.
-- **Easy peer setup:** export/import GRE pairing codes and private forwarding configuration files.
+- **Easy peer setup:** copy/paste GRE and Rathole base64 pairing codes, including several Rathole forwarding ports in one code.
+- **Guided Rathole setup:** install the official release, choose forwarding ports, and generate tokens and Noise keys automatically.
 - **Persistent services:** systemd integration restores enabled resources after reboot.
 - **Preview before applying:** inspect changes before committing, with rollback and interrupted-transaction recovery.
 - **Diagnostics and automation:** peer reachability checks, drift detection, JSON output, and an interactive menu.
 - **No Python dependencies:** uses the Python standard library.
 
-GRE does **not** encrypt or authenticate traffic. Rathole mode supports **rathole 0.5.0, TCP only**. There is no web panel or SOCKS proxy.
+GRE does **not** encrypt or authenticate traffic. New Rathole forwards use **Noise encryption** inside GRE and support **rathole 0.5.0, TCP only**. Existing TCP configurations retain their transport until explicitly upgraded. There is no web panel or SOCKS proxy.
 
 ## Requirements
 
@@ -52,13 +53,43 @@ sudo twinlink menu
 
 The command is installed at `/usr/local/bin/twinlink`; managed services use `/usr/local/libexec/twinlink-runtime`. Use `--skip-deps` with the installer to check existing dependencies without changing packages.
 
-For optional rathole setup, supply a separately obtained, trusted **0.5.0** executable:
+Rathole can be installed by twinLink on Linux x86_64 or ARM64:
+
+```sh
+sudo twinlink rathole install --apply
+```
+
+This downloads the pinned official **0.5.0** release over HTTPS, checks its version and Noise support, and installs `/usr/local/bin/rathole`. Compatible existing executables are reused; other existing files are never replaced. Optionally supply `--sha256 TRUSTED_ARCHIVE_SHA256` to verify the downloaded ZIP against a trusted checksum. When GitHub is unreachable, copy a trusted matching binary from another host and select it with `--rathole-binary`.
+
+You can also check a separately obtained executable during program installation:
 
 ```sh
 sudo scripts/install.sh --rathole /opt/rathole/rathole --rathole-sha256 TRUSTED_SHA256
 ```
 
-Replace `TRUSTED_SHA256` with the publisher's trusted checksum. The installer checks the binary; it does not download it. When using a custom path, pass `--rathole-binary /opt/rathole/rathole` before the CLI command. The default path is `/usr/local/bin/rathole`.
+Replace `TRUSTED_SHA256` with a trusted checksum of the executable. When using a custom path, pass `--rathole-binary /opt/rathole/rathole` before the CLI command.
+
+## Rathole with minimum setup
+
+After pairing and verifying GRE on both servers (steps 1–2 below), run on each server:
+
+```sh
+sudo twinlink rathole setup
+```
+
+On **VPS1**, select create, enter the GRE name and backend address, then forwarding ports such as `8080:80,8443:443,9000`. A single number forwards to the same backend port. The wizard installs Rathole when missing, generates service tokens and Noise keys, and configures every port together. Copy the resulting **`r1.` base64 pairing text**.
+
+On **VPS2**, select paste and paste the text. Review and apply once to configure/start all imported forwards and enable them at boot. You do not need to generate credentials or edit TOML. The code contains service tokens and Noise public keys; the server's private keys stay on VPS1. Treat the text as a secret: base64 does not encrypt it.
+
+To display config paths and editor commands without opening an editor:
+
+```sh
+sudo twinlink rathole config app-8080
+# Default config: /var/lib/twinlink/rathole/app-8080.toml
+# Edit manually: sudo vim /var/lib/twinlink/rathole/app-8080.toml
+```
+
+Manual TOML edits are overwritten on reapply or boot restore. Use `forward edit` for persistent port/address changes, then generate a fresh Rathole pairing code. See [Rathole commands](docs/commands.md#rathole-installation-noise-and-base64-pairing).
 
 ## Quick start
 

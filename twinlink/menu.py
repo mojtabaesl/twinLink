@@ -1,5 +1,6 @@
 """Numbered operator workflows which reuse the scriptable CLI and its checks."""
 
+import os
 import shlex
 
 
@@ -98,13 +99,46 @@ class _Menu:
             return
         result = self.invoke(clean)
         if not mutation or result:
-            return
+            return result
         if self.prompt("Review the preview above. Type apply to execute it; Enter cancels").lower() != "apply":
             self.write("Preview only; no changes applied.")
             return
         # The preceding prompt is the explicit apply confirmation, so do not
         # ask the operator to confirm the same preview a second time in CLI.
-        self.invoke(clean + ["--apply", "--yes"])
+        return self.invoke(clean + ["--apply", "--yes"])
+
+    def rathole_setup(self):
+        from .rathole import port_mappings
+        self.write("Rathole over GRE with Noise encryption. Verify GRE on both servers first.")
+        self.write("Setup installs Rathole if needed and generates credentials automatically. No editor is opened.")
+        side = self.choice("This server", (("1", "VPS1: create forwarding and base64 pairing text"),
+                                           ("2", "VPS2: paste base64 pairing text")))
+        if side == "1":
+            name = self.prompt("Forwarding name/prefix", default="app")
+            tunnel = self.prompt("Verified GRE tunnel name", required=True)
+            destination = self.prompt("Backend IPv4 reachable from VPS2", default="127.0.0.1")
+            while True:
+                ports = self.prompt("Forwarding ports PUBLIC:BACKEND, comma separated (e.g. 8080:80,8443:443; 9000 keeps the same port)", required=True)
+                try:
+                    port_mappings(ports)
+                    break
+                except ValueError as exc:
+                    self.write(str(exc))
+            command = ["rathole", "add", name, "--tunnel", tunnel, "--destination-address", destination, "--ports", ports]
+        else:
+            self.write("Pairing text contains service tokens. Paste it only on the intended peer.")
+            code = self.prompt("Rathole base64 pairing text (r1.…)", required=True)
+            command = ["rathole", "pair-import", "--code", code, "--enable"]
+        binary = self.globals[self.globals.index("--rathole-binary") + 1] if "--rathole-binary" in self.globals else "/usr/local/bin/rathole"
+        if not os.path.exists(binary):
+            self.write("Install the official pinned Rathole release on this server:")
+            installed = self.execute(["rathole", "install"], mutation=True)
+            if installed != 0:
+                return installed
+        result = self.execute(command, mutation=True)
+        if result == 0 and side == "1":
+            self.write("Copy pairing_code above to VPS2 and run: sudo twinlink rathole setup")
+        return result
 
     def named(self, group, action, extra=(), mutation=False):
         name = self.prompt("Local " + group + " name", required=True)
@@ -270,11 +304,12 @@ class _Menu:
         except ValueError as exc:
             self.write("Invalid command quoting: " + str(exc))
             return
-        if not command or command[0] not in {"tunnel", "forward", "doctor", "status", "recover", "uninstall"}:
-            self.write("Choose a tunnel, forward, doctor, status, recover or uninstall subcommand.")
+        if not command or command[0] not in {"tunnel", "forward", "rathole", "doctor", "status", "recover", "uninstall"}:
+            self.write("Choose a tunnel, forward, rathole, doctor, status, recover or uninstall subcommand.")
             return
         action = command[1] if len(command) > 1 else ""
         mutation = ((command[0] in {"tunnel", "forward"} and action in {"create", "add", "edit", "pair-import", "import", "enable", "disable", "start", "stop", "restart", "reapply", "delete"})
+                    or (command[0] == "rathole" and action in {"install", "add", "pair-import"})
                     or command[0] == "recover" or (command[0] == "uninstall" and "--purge-managed" in command)
                     or (command[0] == "tunnel" and action == "check" and "--record" in command))
         self.execute(command, mutation=mutation, private_export=command[:2] == ["forward", "export"])
@@ -285,7 +320,8 @@ class _Menu:
             selected = self.choice("Main menu", (
                 ("1", "Overview and live health"), ("2", "GRE tunnels"), ("3", "Forwarding entries"),
                 ("4", "Dependency doctor"), ("5", "Recover interrupted transaction"),
-                ("6", "Expert CLI subcommand"), ("0", "Exit")))
+                ("6", "Expert CLI subcommand"), ("7", "Rathole installation and Noise setup"),
+                ("8", "Rathole config paths and editor commands"), ("0", "Exit")))
             if selected == "0":
                 return 0
             try:
@@ -299,6 +335,10 @@ class _Menu:
                     self.execute(["doctor"])
                 elif selected == "5":
                     self.execute(["recover"], mutation=True)
+                elif selected == "7":
+                    self.rathole_setup()
+                elif selected == "8":
+                    self.named("rathole", "config")
                 else:
                     self.expert()
             except _Cancelled:
@@ -315,4 +355,16 @@ def run_menu(args, command_runner=None, input_fn=None, output_fn=None):
         return menu.run()
     except (EOFError, KeyboardInterrupt, _Cancelled):
         menu.write("\nMenu closed.")
+        return 0
+
+
+def run_rathole_setup(args, command_runner=None, input_fn=None, output_fn=None):
+    if command_runner is None:
+        from .cli import main
+        command_runner = main
+    menu = _Menu(args, command_runner, input_fn or input, output_fn or print)
+    try:
+        return menu.rathole_setup() or 0
+    except (EOFError, KeyboardInterrupt, _Cancelled):
+        menu.write("\nSetup cancelled.")
         return 0

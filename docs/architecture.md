@@ -8,6 +8,7 @@ The CLI treats a GRE tunnel and its forwarding entries as separate resources. Ea
 | --- | --- |
 | `models.py` | Normalize records, validate names/addresses/ranges, reserve ports and detect managed conflicts. |
 | `pairing.py` | Bounded checksummed exchange, side reversal, peer matching and revision checks. |
+| `rathole.py` | Pinned upstream binary installation, version/Noise checks, native X25519 key generation and port-mapping parsing. |
 | `render.py` | Pure systemd, rathole and nftables rendering with explicit ownership markers. |
 | `host.py` | Shell-free command execution, kernel/socket/service observations and health diagnostics. |
 | `store.py` | Private atomic persistence, symlink rejection and exclusive mutation lock. |
@@ -45,17 +46,17 @@ flowchart LR
 
 Kernel mode applies DNAT on VPS1 to the peer GRE address and a per-entry relay port/range, then DNAT on VPS2 to its reachable backend. Return traffic uses managed SNAT/masquerade. MTU is configured per GRE tunnel and inspected with path-MTU diagnostics. Relay ranges reserve a maximum of 256 ports and remain reserved by stopped/disabled records. A singleton backend port maps a whole public range to that port; otherwise range widths must agree. IPv4 forwarding is enabled when required and its previous value is captured for transaction rollback.
 
-Rathole mode uses one service and strong token per entry. VPS1 listens for the rathole connection only on its private GRE address and separately binds the chosen public service tuple. VPS2 connects to that private GRE address and opens the destination connection locally. Its service identity, token and transport port must match VPS1. Generated TOML is private. TCP is supported; UDP is rejected pending version-specific packet tests. Neither mode supplies GRE encryption.
+Rathole mode uses one service and strong token per entry. New CLI records default to Noise with native-generated X25519 keys; old records without a transport field remain TCP. VPS1 stores the private/public keypair and VPS2 stores only the server public key. The client authenticates the server with Noise NK. VPS1 listens for the rathole connection only on its private GRE address and separately binds the chosen public service tuple. VPS2 connects to that private GRE address and opens the destination connection locally. Its service identity, token and transport port must match VPS1. Generated TOML is private. TCP services are supported; UDP is rejected pending version-specific packet tests. Noise encrypts Rathole traffic inside GRE; GRE itself and kernel forwarding remain unencrypted.
 
 ## Pairing and secrets
 
-GRE codes start `v1.`. Forward codes start `f1.`. The frame contains a CRC32 over canonical JSON followed by gzip-compressed JSON, encoded as base64url. Decoding accepts outer clipboard whitespace and padding but rejects unknown versions/kinds, duplicate JSON fields, malformed data and failed checksums. Encoded input is bounded to 128 KiB and decompressed JSON to 64 KiB. CRC32 detects corruption, not malicious tampering or identity.
+GRE codes start `v1.`. Forward codes start `f1.`. Rathole bundles start `r1.` and contain up to 64 forward codes. The frame contains a CRC32 over canonical JSON followed by gzip-compressed JSON, encoded as base64url. Decoding accepts outer clipboard whitespace and padding but rejects unknown versions/kinds, duplicate JSON fields, malformed data and failed checksums. Encoded input is bounded to 128 KiB and decompressed JSON to 64 KiB. CRC32 detects corruption, not malicious tampering or identity.
 
 GRE export whitelists the tunnel's name, side, public endpoints, both private addresses, key, MTU and TTL. It excludes forwarding credentials. Import swaps both endpoint/address pairs and side, regenerates the local interface name, and returns an unverified, stopped record. The CLI previews this decoded record with active runtime and boot flags before applying the import; verification remains false. Conflicts are validated before any application.
 
 Forward export explicitly includes a rathole token when applicable and must be written to a private mode-0600 file. Import matches the mirrored tunnel by endpoints, private addresses, key, MTU and TTL rather than a host-local tunnel name. A verified matching GRE tunnel is required. The canonical public bind remains VPS1's address on either host. Service name changes for rathole are refused because they would prevent server/client matching. Older revisions are rejected. Imports are stopped until explicitly started.
 
-State, journals and rathole configurations contain secrets and require restricted permissions. Preserve them only in private backups. Human-readable previews and routine JSON responses redact tokens; explicit forwarding export is the intentional secret transfer boundary.
+State, journals and rathole configurations contain secrets and require restricted permissions. Preserve them only in private backups. Human-readable previews and routine JSON responses redact tokens and private keys. Explicit forwarding export, Rathole pairing export, and successful Rathole setup output are the intentional token-transfer boundaries. Server private keys are excluded from every pairing format. Rathole bundle import validates all records before one local transaction; `--enable` explicitly enables/starts them. An export from VPS2 can update its existing VPS1 peer only while retaining that server's original keypair.
 
 ## Health and proof
 

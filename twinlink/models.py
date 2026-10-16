@@ -184,7 +184,7 @@ def _listener_conflict(address, port, protocol, listeners, existing_name):
             raise ValidationError(f"{protocol} port {port} conflicts with an existing host listener at {listener_address}:{listener_port}")
 
 
-def validate_forward(entry, state, existing_name=None, listeners=(), protected_ports=(22,)):
+def validate_forward(entry, state, existing_name=None, listeners=(), protected_ports=(22,), require_noise_private=True):
     """Normalize a forward and reject local and managed public port conflicts.
 
     Public bind addresses are canonical VPS1 addresses on both hosts. Disabled
@@ -255,7 +255,20 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
             raise ValidationError("rathole token must contain 32–128 URL-safe letters, digits, underscores or hyphens")
         out["token"] = token
         out["transport_port"] = _integer(entry.get("transport_port", default_transport_port(name)), "transport_port", 1024, 65535)
+        transport = entry.get("rathole_transport", "tcp")
+        if transport not in ("tcp", "noise"):
+            raise ValidationError("rathole_transport must be tcp or noise")
+        # Missing transport preserves compatibility with existing TCP records.
+        if "rathole_transport" in entry:
+            out["rathole_transport"] = transport
+        if transport == "noise":
+            from .rathole import key
+            out["noise_public_key"] = key(entry.get("noise_public_key"))
+            if side == "vps1" and require_noise_private:
+                out["noise_private_key"] = key(entry.get("noise_private_key"))
     else:
+        if entry.get("rathole_transport") is not None:
+            raise ValidationError("Noise transport applies only to rathole forwarding")
         width = last - first + 1
         relay_first = 20000 + int(hashlib.sha256(name.encode("ascii")).hexdigest()[:8], 16) % (40000 - width)
         default_relay = str(relay_first) if width == 1 else f"{relay_first}-{relay_first + width - 1}"

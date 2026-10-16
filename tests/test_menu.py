@@ -1,7 +1,8 @@
 import argparse
 import unittest
+from unittest.mock import patch
 
-from twinlink.menu import _safe_command, run_menu
+from twinlink.menu import _safe_command, run_menu, run_rathole_setup
 
 
 class MenuTests(unittest.TestCase):
@@ -73,6 +74,37 @@ class MenuTests(unittest.TestCase):
         for private in ("PRIVATECODE", "SECRETTOKEN", "PASSWORD"):
             self.assertNotIn(private, result)
         self.assertIn("<redacted>", result)
+
+    def test_noise_setup_installs_then_batches_ports_without_manual_credentials(self):
+        with patch("twinlink.menu.os.path.exists", return_value=False):
+            calls, output = self.run_script(["7", "1", "app", "edge", "", "8080:80,8443:443", "apply", "apply", "0"])
+        self.assertEqual(calls[0][-2:], ["rathole", "install"])
+        self.assertEqual(calls[1], calls[0] + ["--apply", "--yes"])
+        self.assertIn("8080:80,8443:443", calls[2])
+        self.assertEqual(calls[3], calls[2] + ["--apply", "--yes"])
+        self.assertEqual(len(calls), 4)
+        self.assertNotIn("--token", calls[2])
+
+    def test_paste_pairing_text_is_redacted_and_reuses_existing_install(self):
+        with patch("twinlink.menu.os.path.exists", return_value=True):
+            calls, output = self.run_script(["7", "2", "r1.SECRET_PAIRING", "apply", "0"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("r1.SECRET_PAIRING", calls[0])
+        self.assertIn("--enable", calls[0])
+        self.assertNotIn("r1.SECRET_PAIRING", "\n".join(output))
+
+    def test_cancelled_install_does_not_attempt_noise_setup(self):
+        with patch("twinlink.menu.os.path.exists", return_value=False):
+            calls, _ = self.run_script(["7", "2", "r1.SECRET", "", "0"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-2:], ["rathole", "install"])
+
+    def test_direct_setup_propagates_failed_preview_exit_code(self):
+        answers = iter(["2", "r1.INVALID"])
+        with patch("twinlink.menu.os.path.exists", return_value=True):
+            result = run_rathole_setup(argparse.Namespace(), command_runner=lambda command: 1,
+                                      input_fn=lambda prompt: next(answers), output_fn=lambda value: None)
+        self.assertEqual(result, 1)
 
 
 if __name__ == "__main__":

@@ -196,6 +196,12 @@ def render_rathole(entry: dict, tunnel: dict) -> str:
     else:
         service_endpoint = f"{_ipv4(entry['destination_address'])}:{destination}"
         lines.append(f"local_addr = {_quoted(service_endpoint)}")
+    if entry.get("rathole_transport") == "noise":
+        from .rathole import key
+        key_name = "local_private_key" if side == "vps1" else "remote_public_key"
+        value = key(entry.get("noise_private_key" if side == "vps1" else "noise_public_key"))
+        lines += ["", f"[{role}.transport]", 'type = "noise"', "",
+                  f"[{role}.transport.noise]", f"{key_name} = {_quoted(value)}"]
     return "\n".join(lines) + "\n"
 
 

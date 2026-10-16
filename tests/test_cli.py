@@ -13,6 +13,7 @@ from twinlink import cli
 from twinlink.models import empty_state
 from twinlink.store import Store
 from tests.test_engine import MemoryHost, active_state
+from tests.test_rathole import KEYS, PRIVATE, noise_pair
 
 
 CREATE = ["tunnel", "create", "edge", "--side", "vps1", "--local-public", "198.51.100.1",
@@ -234,6 +235,97 @@ class CLITests(unittest.TestCase):
         code, result = self.invoke(["status"])
         self.assertEqual(code, 1)
         self.assertIn("chmod 600", result["error"])
+
+    def test_noise_setup_batches_ports_and_exports_only_after_commit(self):
+        self.create_verified_gre()
+        arguments = ["rathole", "add", "app", "--tunnel", "edge", "--ports", "8080:80,8443:443"]
+        with patch.object(cli.rathole, "generate_keypair", return_value=KEYS):
+            code, result = self.invoke(arguments)
+            self.assertEqual(code, 0, result)
+            self.assertNotIn("pairing_code", result)
+            self.assertNotIn(PRIVATE, json.dumps(result))
+            self.assertFalse(self.store.read()["forwards"])
+            code, result = self.invoke(arguments + ["--apply", "--yes"])
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["committed"])
+        self.assertTrue(result["pairing_code"].startswith("r1."))
+        self.assertNotIn(PRIVATE, json.dumps(result))
+        saved = self.store.read()
+        self.assertEqual(set(saved["forwards"]), {"app-8080", "app-8443"})
+        tokens = {entry["token"] for entry in saved["forwards"].values()}
+        self.assertEqual(len(tokens), 2)
+        self.assertEqual(saved["forwards"]["app-8080"]["noise_private_key"], PRIVATE)
+        self.assertIn('type = "noise"', (self.state_dir / "rathole/app-8080.toml").read_text())
+
+    def test_noise_import_applies_bundle_and_enable_without_generating_keys(self):
+        source, peer = noise_pair()
+        from twinlink import pairing
+        pairing_code = pairing.export_rathole(list(source["forwards"].values()), source)
+        peer["tunnels"]["edge"].update(running=False, enabled=False)
+        self.store.write(peer)
+        with patch.object(cli.rathole, "generate_keypair") as generate:
+            code, result = self.invoke(["rathole", "pair-import", "--code", pairing_code, "--apply", "--yes"])
+            self.assertEqual(code, 0, result)
+            generate.assert_not_called()
+        entries = self.store.read()["forwards"]
+        self.assertEqual(len(entries), 2)
+        self.assertNotIn("noise_private_key", entries["web"])
+        self.assertFalse(entries["web"]["running"])
+        code, result = self.invoke(["rathole", "pair-import", "--code", pairing_code, "--enable"])
+        self.assertEqual(code, 1)
+        self.assertIn("Start the GRE", result["error"])
+
+    def test_noise_import_enable_keeps_peer_public_key_and_boot_intent(self):
+        source, peer = noise_pair()
+        from twinlink import pairing
+        pairing_code = pairing.export_rathole(list(source["forwards"].values()), source)
+        self.store.write(peer)
+        self.host.address_data[0]["addr_info"][0]["local"] = "203.0.113.2"
+        code, result = self.invoke(["tunnel", "reapply", "edge", "--apply", "--yes"])
+        self.assertEqual(code, 0, result)
+        code, result = self.invoke(["rathole", "pair-import", "--code", pairing_code, "--enable", "--apply", "--yes"])
+        self.assertEqual(code, 0, result)
+        for entry in self.store.read()["forwards"].values():
+            self.assertTrue(entry["running"])
+            self.assertTrue(entry["enabled"])
+            self.assertNotIn("noise_private_key", entry)
+        self.assertIn("remote_public_key", (self.state_dir / "rathole/web.toml").read_text())
+
+    def test_rathole_config_prints_quoted_paths_without_opening_editor(self):
+        self.store.write(active_state("rathole"))
+        with patch("subprocess.run") as run:
+            code, result = self.invoke(["rathole", "config", "web"])
+            run.assert_not_called()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["path"], str(self.state_dir / "rathole/web.toml"))
+        self.assertIn("sudo vim", result["edit_with_vim"])
+        self.assertIn("overwritten", result["note"])
+
+    def test_rathole_install_previews_without_downloading(self):
+        with patch.object(cli.rathole, "install_plan", return_value={"path": "/opt/rathole", "already_installed": False}), patch.object(cli.rathole, "install") as install:
+            code, result = self.invoke(["rathole", "install"])
+            self.assertEqual(code, 0, result)
+            install.assert_not_called()
+            self.assertFalse(self.state_dir.exists())
+
+    def test_rathole_upgrade_preserves_legacy_until_explicit_noise_edit(self):
+        state = active_state("rathole")
+        self.store.write(state)
+        with patch.object(cli.rathole, "generate_keypair", return_value=KEYS):
+            code, result = self.invoke(["forward", "edit", "web", "--rathole-transport", "noise"])
+        self.assertEqual(code, 0, result)
+        candidate = result["configuration"]["forwards"]["web"]
+        self.assertEqual(candidate["rathole_transport"], "noise")
+        self.assertFalse(candidate["running"])
+        self.assertEqual(candidate["revision"], 2)
+        self.assertNotIn("rathole_transport", self.store.read()["forwards"]["web"])
+
+    def test_batch_invalid_second_port_never_commits_first_entry(self):
+        self.create_verified_gre()
+        with patch.object(cli.rathole, "generate_keypair", return_value=KEYS):
+            code, result = self.invoke(["rathole", "add", "app", "--tunnel", "edge", "--ports", "8080:80,22:443", "--apply", "--yes"])
+        self.assertEqual(code, 1, result)
+        self.assertFalse(self.store.read()["forwards"])
 
 
 if __name__ == "__main__":
