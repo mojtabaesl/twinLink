@@ -346,6 +346,44 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
     def test_rathole_noise_external_request_edit_disable_restart_delete_and_restore(self):
         self._rathole_lifecycle(noise=True)
 
+    def test_rathole_shared_noise_config_two_ports_and_independent_stop(self):
+        binary = os.environ.get("TWINLINK_RATHOLE_BINARY") or shutil.which("rathole")
+        if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
+            self.skipTest("set TWINLINK_RATHOLE_BINARY to an executable rathole binary")
+        from twinlink.rathole import generate_keypair
+        keys = generate_keypair(binary)
+        self._echo()
+        self._echo(port=28081, marker="second")
+        for side in self.hosts:
+            candidate = self.stores[side].read()
+            for public, destination in ((18080, 28080), (18081, 28081)):
+                entry = validate_forward({"name": f"shared-{public}", "tunnel": "edge", "mode": "rathole",
+                                          "protocol": "tcp", "bind_address": "198.18.0.1", "bind_port": str(public),
+                                          "destination_address": "10.81.0.2", "destination_port": str(destination),
+                                          "rathole_group": "shared", "transport_port": 2444,
+                                          "token": "integration-shared-service-0123456789", "rathole_transport": "noise",
+                                          "enabled": True, "running": True, **keys}, candidate)
+                candidate["forwards"][entry["name"]] = entry
+            self._apply(side, candidate, "add shared Noise config")
+
+        def start_pair():
+            return [self._start_process(side, [binary, rathole_config_path("shared", str(self.stores[side].directory))])[0]
+                    for side in self.hosts]
+
+        pair = start_pair()
+        self._assert_reaches()
+        self._assert_reaches("second", port=18081)
+        for process in pair:
+            self._stop(process)
+        for side in self.hosts:
+            candidate = self.stores[side].read()
+            candidate["forwards"]["shared-18080"].update(enabled=False, running=False)
+            self._apply(side, candidate, "disable only the first shared service")
+        start_pair()
+        self._assert_reaches("second", port=18081)
+        self._assert_closed(port=18080)
+        self._assert_foreign_unchanged()
+
     def _rathole_lifecycle(self, noise=False):
         binary = os.environ.get("TWINLINK_RATHOLE_BINARY") or shutil.which("rathole")
         if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):

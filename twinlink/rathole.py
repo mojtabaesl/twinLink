@@ -149,4 +149,4 @@ def port_mappings(value):
 
 
 def forward_names(name, mappings):
-    return [name if len(mappings) == 1 else f"{name}-{public}" for public, _ in mappings]
+    return [f"{name[:42]}-{public}" for public, _ in mappings]

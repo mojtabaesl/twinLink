@@ -10,6 +10,7 @@ import re
 import time
 
 from .store import StateError, atomic_write, reject_symlink
+from .rathole_groups import group_name, groups, unit_name, units
 
 
 class ApplyError(RuntimeError):
@@ -66,6 +67,10 @@ class Engine:
         if force:
             (tunnels if force[0] == "tunnel" else forwards).add(force[1])
         forwards |= {n for state in (old, new) for n, f in state["forwards"].items() if f["tunnel"] in tunnels}
+        shared = {group_name(entry) for state in (old, new) for name, entry in state["forwards"].items()
+                  if name in forwards and entry["mode"] == "rathole"}
+        forwards |= {name for state in (old, new) for name, entry in state["forwards"].items()
+                     if entry["mode"] == "rathole" and group_name(entry) in shared}
         return tunnels, forwards
 
     def plan(self, old, new, action):
@@ -107,16 +112,13 @@ class Engine:
         if any(f.get("running") and f["mode"] == "kernel" for f in new["forwards"].values()):
             commands.append(["sysctl", "-w", "net.ipv4.ip_forward=1"])
         if self.systemd:
-            for name in sorted(changed_f):
-                previous = old["forwards"].get(name)
-                if previous and previous["mode"] == "rathole":
-                    commands.append(["systemctl", "stop", f"twinlink-rathole-{name}.service"])
+            for unit in sorted(units(old, changed_f)):
+                commands.append(["systemctl", "stop", unit])
             commands.append(["systemctl", "daemon-reload"])
             commands += self.service_commands(new)
-            for name in sorted(changed_f):
-                entry = new["forwards"].get(name)
-                if entry and entry["mode"] == "rathole" and entry.get("running"):
-                    commands.append(["systemctl", "restart", f"twinlink-rathole-{name}.service"])
+            for name, entries in sorted(groups(new).items()):
+                if any(entry["name"] in changed_f for entry in entries) and any(entry["running"] for entry in entries):
+                    commands.append(["systemctl", "restart", unit_name(entries[0])])
         commands += self.flow_commands(old, new)
         if not new["tunnels"]:
             commands.append(["nft", "delete", "table", "ip", "twinlink"])
@@ -135,7 +137,9 @@ class Engine:
                              "Restore prior ip_forward value", "Retain journal and repair instructions if any rollback step fails"],
                 "notes": ["No peer is changed automatically. Transfer a fresh forwarding export after shared configuration edits.",
                           "Existing conntrack flows for changed/stopped kernel entries are removed; active connections will end.",
-                          "GRE offers no encryption. Permit IP protocol 47 and private-GRE ICMP on both providers/hosts."]}
+                          "GRE offers no encryption. Permit IP protocol 47 and private-GRE ICMP on both providers/hosts."]
+                         + [f"Updating Rathole {name} restarts its shared process; all {len(entries)} configured services reconnect."
+                            for name, entries in groups(new).items() if len(entries) > 1 and any(entry["name"] in changed_f for entry in entries)]}
 
     @staticmethod
     def tunnel_commands(tunnel):
@@ -151,9 +155,8 @@ class Engine:
         commands = [["systemctl", "enable" if state["tunnels"] else "disable", "twinlink-restore.service"]]
         for name, tunnel in sorted(state["tunnels"].items()):
             commands.append(["systemctl", "enable" if tunnel["enabled"] else "disable", f"twinlink-gre-{name}.service"])
-        for name, entry in sorted(state["forwards"].items()):
-            if entry["mode"] == "rathole":
-                commands.append(["systemctl", "enable" if entry["enabled"] else "disable", f"twinlink-rathole-{name}.service"])
+        for entries in groups(state).values():
+            commands.append(["systemctl", "enable" if any(entry["enabled"] for entry in entries) else "disable", unit_name(entries[0])])
         return commands
 
     def _run(self, args, **kwargs):
@@ -207,7 +210,7 @@ class Engine:
         if self.systemd:
             for state in (old, new):
                 units.update(f"twinlink-gre-{n}.service" for n in state["tunnels"])
-                units.update(f"twinlink-rathole-{n}.service" for n, f in state["forwards"].items() if f["mode"] == "rathole")
+                units.update(unit_name(entry) for entry in state["forwards"].values() if entry["mode"] == "rathole")
             units.add("twinlink-restore.service")
         services = {u: {"active": self._run(["systemctl", "is-active", u], check=False)["stdout"].strip() == "active",
                         "enabled": self._run(["systemctl", "is-enabled", u], check=False)["stdout"].strip() == "enabled"}
@@ -324,16 +327,21 @@ class Engine:
             self._run(["systemctl", "daemon-reload"])
             for command in self.service_commands(new):
                 self._run(command)
-            for name, entry in sorted(new["forwards"].items()):
-                if name in changed_f and entry["mode"] == "rathole" and entry.get("running"):
-                    self._run(["systemctl", "restart", f"twinlink-rathole-{name}.service"])
-            for name in old["forwards"].keys() - new["forwards"].keys():
-                if old["forwards"][name]["mode"] == "rathole":
-                    self._run(["systemctl", "disable", f"twinlink-rathole-{name}.service"])
+            for entries in groups(new).values():
+                if any(entry["name"] in changed_f for entry in entries) and any(entry["running"] for entry in entries):
+                    self._run(["systemctl", "restart", unit_name(entries[0])])
+            for unit in units(old) - units(new):
+                self._run(["systemctl", "disable", unit])
             for name in old["tunnels"].keys() - new["tunnels"].keys():
                 self._run(["systemctl", "disable", f"twinlink-gre-{name}.service"])
             if not new["tunnels"]:
                 self._run(["systemctl", "stop", "twinlink-restore.service"])
+        elif self.systemd and boot:
+            self._run(["systemctl", "daemon-reload"])
+            for entries in groups(new).values():
+                if any(entry["running"] for entry in entries):
+                    # These units are ordered after the restore callback itself.
+                    self._run(["systemctl", "--no-block", "restart", unit_name(entries[0])])
 
     def _verify(self, old, new, boot=False):
         from .render import render_nft
@@ -364,8 +372,11 @@ class Engine:
             for name, previous in old["forwards"].items():
                 current = new["forwards"].get(name)
                 if previous["mode"] == "rathole" and not (current and current.get("running")):
-                    unit = f"twinlink-rathole-{name}.service"
-                    if self._run(["systemctl", "is-active", unit], check=False)["stdout"].strip() == "active" or any(l.get("managed") == name for l in listeners):
+                    unit = unit_name(previous)
+                    shared_running = any(entry["running"] for entry in groups(new).get(group_name(previous), []))
+                    exposed = previous["side"] == "vps1" and any(l.get("managed") == group_name(previous)
+                              and l.get("port") == int(previous["bind_port"]) for l in listeners)
+                    if (not shared_running and self._run(["systemctl", "is-active", unit], check=False)["stdout"].strip() == "active") or exposed:
                         raise ApplyError("Stopped rathole entry remains active during restore: " + name)
         if not boot:
             listeners = self.host.listeners()
@@ -375,7 +386,7 @@ class Engine:
                 entry = new["forwards"].get(name)
                 previous = old["forwards"].get(name)
                 if entry and entry["mode"] == "rathole" and entry.get("running") and self.systemd:
-                    unit = f"twinlink-rathole-{name}.service"
+                    unit = unit_name(entry)
                     deadline = time.monotonic() + 5
                     while True:
                         active = self._run(["systemctl", "is-active", unit], check=False)["stdout"].strip() == "active"
@@ -393,7 +404,10 @@ class Engine:
                             peer = str(ipaddress.ip_interface(new["tunnels"][entry["tunnel"]]["remote_private"]).ip)
                             connected = any(c.get("address") == private and c.get("port") == transport and c.get("peer_address") == peer
                                             for c in self.host.connections())
-                            if not connected:
+                            awaiting_pair = ("rathole_group" in entry and
+                                             (not previous or not previous.get("running") or previous.get("revision") != entry.get("revision")
+                                              or group_name(previous) != group_name(entry)))
+                            if not connected or awaiting_pair:
                                 # v0.5.0 binds its public service only after an
                                 # authenticated client registers. Commit the local
                                 # listener setup so its credentials can be exported.
@@ -412,8 +426,8 @@ class Engine:
     def safety(self, old, new, boot=False):
         from .models import validate_tunnel, validate_forward
         listeners = self.host.listeners()
-        free = [l for l in listeners if not (l.get("managed") in old["forwards"] and
-                old["forwards"][l["managed"]]["mode"] == "rathole" and self.systemd)]
+        owned_groups = groups(old)
+        free = [l for l in listeners if not (l.get("managed") in owned_groups and self.systemd)]
         protected = {22}
         connection = os.environ.get("SSH_CONNECTION", "").split()
         if len(connection) == 4 and connection[3].isdigit():
@@ -495,10 +509,12 @@ class Engine:
             if self.systemd:
                 # rathole watches its TOML. Stop before atomically replacing it,
                 # so hot reload cannot expose a new port before verification.
-                for name in snapshot["affected_forwards"]:
-                    entry = old["forwards"].get(name)
-                    if entry and entry["mode"] == "rathole" and (not boot or not new["forwards"].get(name, {}).get("running")):
-                        self._run(["systemctl", "stop", f"twinlink-rathole-{name}.service"])
+                old_groups, new_groups = groups(old), groups(new)
+                for unit in sorted(units(old, snapshot["affected_forwards"])):
+                    group = unit.removeprefix("twinlink-rathole-").removesuffix(".service")
+                    entries = new_groups.get(group, [])
+                    if not boot or not any(entry["running"] for entry in entries) or entries != old_groups.get(group):
+                        self._run(["systemctl", "stop", unit])
             files = self.files(new)
             for path, spec in files.items():
                 target = Path(path)
@@ -544,7 +560,7 @@ class Engine:
         if self.systemd:
             for unit in snapshot["services"]:
                 affected_forwards = snapshot.get("affected_forwards", list(snapshot["candidate"]["forwards"]))
-                if unit in {f"twinlink-rathole-{n}.service" for n in affected_forwards}:
+                if unit in units(snapshot["old"], affected_forwards) | units(snapshot["candidate"], affected_forwards):
                     attempt("stop " + unit, lambda u=unit: self._run(["systemctl", "stop", u]))
                 if snapshot["files"].get(str(Path(self.unit_dir) / unit)) is None and (Path(self.unit_dir) / unit).exists():
                     attempt("disable new " + unit, lambda u=unit: self._run(["systemctl", "disable", u]))
@@ -661,7 +677,7 @@ class Engine:
         if self.systemd:
             affected = snapshot.get("affected_forwards", list(snapshot["candidate"]["forwards"]))
             for unit, status in snapshot["services"].items():
-                if unit in {f"twinlink-rathole-{n}.service" for n in affected}:
+                if unit in units(snapshot["old"], affected) | units(snapshot["candidate"], affected):
                     active = self._run(["systemctl", "is-active", unit], check=False)["stdout"].strip() == "active"
                     if active != status["active"]:
                         raise ApplyError("Service runtime differs after rollback: " + unit)

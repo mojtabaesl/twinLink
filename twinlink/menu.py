@@ -4,6 +4,7 @@ import os
 import shlex
 
 from .store import Store, StateError
+from .rathole_groups import groups
 
 
 class _Cancelled(Exception):
@@ -179,28 +180,49 @@ class _Menu:
                               if entry["tunnel"] == tunnel["name"] and entry["mode"] == "rathole")
             if existing:
                 selected = self.choice("Rathole forwarding already saved: " + ", ".join(existing), (
-                    ("1", "Export base64 pairing text for saved forwarding"), ("2", "Add forwarding ports")), default="1")
+                    ("1", "Export base64 pairing text for saved forwarding"), ("2", "Add forwarding ports"),
+                    ("3", "Combine saved forwarding into one Rathole config")), default="1")
                 if selected == "1":
                     self.write("Pairing text contains service tokens. Transfer it privately to VPS2.")
                     return self.invoke(["rathole", "pair-export", *existing])
-            destination = self._rathole_destination(state, tunnel)
-            while True:
-                ports = self.prompt("Forwarding ports PUBLIC:BACKEND, comma separated (e.g. 8080:80,8443:443; 9000 keeps the same port)", required=True)
-                try:
-                    mappings = port_mappings(ports)
-                    break
-                except ValueError as exc:
-                    self.write(str(exc))
-            base = tunnel["name"][:32] + "-rathole"
-            counter = 1
-            while True:
-                suffix = "" if counter == 1 else f"-{counter}"
-                name = base[:42 - len(suffix)] + suffix
-                if not any(item in state["forwards"] for item in forward_names(name, mappings)):
-                    break
-                counter += 1
-            self.write("Forwarding names: " + ", ".join(forward_names(name, mappings)))
-            command = ["rathole", "add", name, "--tunnel", tunnel["name"], "--destination-address", destination, "--ports", ports]
+            combining = bool(existing) and selected == "3"
+            saved_groups = [(name, entries) for name, entries in sorted(groups(state).items())
+                            if entries[0]["tunnel"] == tunnel["name"]]
+            chosen = None
+            if saved_groups and not combining:
+                if len(saved_groups) == 1:
+                    chosen = saved_groups[0]
+                else:
+                    choice = self.choice("Add services to a saved Rathole config", tuple(
+                        (str(index + 1), f"{name}: connection port {entries[0]['transport_port']}")
+                        for index, (name, entries) in enumerate(saved_groups)) + (("0", "Create another named config"),))
+                    if choice != "0":
+                        chosen = saved_groups[int(choice) - 1]
+            if chosen:
+                name, entries = chosen
+                transport_port = str(entries[0]["transport_port"])
+                self.write(f"Reusing Rathole {name}, connection port {transport_port}.")
+            else:
+                name = self.prompt("Rathole name", default=tunnel["name"][:32] + "-rathole")
+                while True:
+                    transport_port = self.prompt("Rathole connection port", default="2333")
+                    if transport_port.isascii() and transport_port.isdigit() and 1024 <= int(transport_port) <= 65535:
+                        break
+                    self.write("Enter one port between 1024 and 65535.")
+            if combining:
+                command = ["rathole", "consolidate", name, "--tunnel", tunnel["name"], "--transport-port", transport_port]
+            else:
+                destination = self._rathole_destination(state, tunnel)
+                while True:
+                    ports = self.prompt("Forwarding ports PUBLIC:BACKEND, comma separated (e.g. 8080:80,8443:443; 9000 keeps the same port)", required=True)
+                    try:
+                        mappings = port_mappings(ports)
+                        break
+                    except ValueError as exc:
+                        self.write(str(exc))
+                self.write("Forwarding services: " + ", ".join(forward_names(name, mappings)))
+                command = ["rathole", "add", name, "--tunnel", tunnel["name"], "--transport-port", transport_port,
+                           "--destination-address", destination, "--ports", ports]
         else:
             self.write("Pairing text contains service tokens. Paste it only on the intended peer.")
             code = self.prompt("Rathole base64 pairing text (r1.…)", required=True)
@@ -385,7 +407,7 @@ class _Menu:
             return
         action = command[1] if len(command) > 1 else ""
         mutation = ((command[0] in {"tunnel", "forward"} and action in {"create", "add", "edit", "pair-import", "import", "enable", "disable", "start", "stop", "restart", "reapply", "delete"})
-                    or (command[0] == "rathole" and action in {"install", "add", "pair-import"})
+                    or (command[0] == "rathole" and action in {"install", "add", "consolidate", "pair-import"})
                     or command[0] == "recover" or (command[0] == "uninstall" and "--purge-managed" in command)
                     or (command[0] == "tunnel" and action == "check" and "--record" in command))
         self.execute(command, mutation=mutation, private_export=command[:2] == ["forward", "export"])

@@ -112,18 +112,19 @@ All Rathole forwards run over a verified GRE tunnel. Create Noise forwards on VP
 
 | Command | Explanation |
 | --- | --- |
-| `twinlink rathole setup` | Reuse saved roles, tunnels and endpoints; select among known backend addresses, enter forwarding ports or paste base64 text. Generates names and credentials, installs if missing, previews/applies and prints config paths. Repeat runs can re-export saved forwards. Also available from main menu option 7. |
+| `twinlink rathole setup` | Reuse saved roles, tunnels and endpoints; ask for a new Rathole name/connection port, backend choice and forwarding ports, or accept pasted pairing text. Services share one config/process. Repeat runs can add to, export, or consolidate saved configs. Also available from main menu option 7. |
 | `twinlink rathole install` | Preview installation of the official pinned 0.5.0 Linux x86_64/ARM64 release at `--rathole-binary`. Add `--apply` to download/install; compatible binaries are reused. |
 | `twinlink rathole install --sha256 HASH --apply` | Verify the downloaded ZIP archive against an optional trusted SHA256. This differs from the source installer's executable checksum. |
-| `twinlink rathole add NAME --tunnel TUNNEL --ports PORTS` | Preview a batch of Noise forwards on VPS1; add `--apply` to configure/start and enable at boot. Successful apply prints a single secret base64 pairing code. |
-| `twinlink rathole pair-export NAME [NAME ...]` | Print one `r1.` base64 code for up to 64 existing Rathole forwards. Includes tokens, ports, GRE parameters and public keys; excludes server private keys. |
+| `twinlink rathole add NAME --tunnel TUNNEL --ports PORTS` | Preview Noise services in the named shared config/process on VPS1. `--transport-port PORT` chooses its connection port (default 2333 for new configs, saved port for existing ones). Add `--apply` to start/enable; successful apply prints a pairing code for the whole config. |
+| `twinlink rathole consolidate NAME --tunnel TUNNEL --transport-port PORT` | Preview merging all Rathole forwards on this tunnel into one named config/process. Preserves service names/tokens, shares a fresh Noise keypair and port, increments revisions, and removes obsolete configs/units. Apply on VPS1, then import the new code on VPS2. |
+| `twinlink rathole pair-export NAME [NAME ...]` | Print one `r1.` base64 code for up to 64 existing services. Accepts Rathole group names or forwarding names; selecting a group member includes its entire group. Excludes server private keys. |
 | `twinlink rathole pair-import --code CODE` | Decode and preview the peer forwards. Add `--apply` to store stopped, or `--enable --apply` to start and enable at boot. Use the wizard to paste without putting credentials in shell history. |
 | `twinlink rathole pair-import --file PATH` | Read pairing text from a private mode-0600 file instead. |
 | `twinlink rathole config NAME` | Print the exact TOML path, quoted vim/nano commands and restart command. Never opens an editor. |
 
-Batch options: `--destination-address` defaults to `127.0.0.1` on VPS2; `--bind-address` defaults to VPS1's public endpoint; `--disabled` stores stopped/disabled forwards. `--ports 8080:80,8443:443,9000` creates three entries named `NAME-8080`, `NAME-8443`, and `NAME-9000`. One mapping uses `NAME` unchanged. Port/name conflicts fail the whole batch before applying.
+Batch options: `--destination-address` defaults to `127.0.0.1` on VPS2; `--bind-address` defaults to VPS1's public endpoint; `--disabled` stores stopped/disabled forwards. `--ports 8080:80,8443:443,9000` creates services named `NAME-8080`, `NAME-8443`, and `NAME-9000`, including the port suffix for a single mapping. Long group names are truncated to 42 characters in generated service names. All services use `NAME.toml` and `twinlink-rathole-NAME.service`. Port/name conflicts fail the whole batch before applying. Separate GRE peers require separate named configurations.
 
-The interactive wizard selects a sole running/verified GRE tunnel automatically and uses its saved role and public/private addresses. Multiple VPS1 tunnels are listed by name and peer IP for numbered selection. VPS2's pairing text identifies its tunnel without a selector. A role selector is needed only if eligible saved tunnels include both roles. Backend choices include saved forwarding destinations, loopback, and VPS2's saved GRE/public IP; choose another address only for a different backend. The wizard generates an available `TUNNEL-rathole` name/prefix, adding a suffix when needed. The CLI `rathole add NAME ...` still accepts explicit names/addresses for scripts. If there are no eligible tunnels, setup prints repair commands for the saved tunnels before attempting installation.
+The interactive wizard selects a sole running/verified GRE tunnel automatically and uses its saved role and public/private addresses. Multiple VPS1 tunnels are listed by name and peer IP for numbered selection. VPS2's pairing text identifies its tunnel without a selector. A role selector is needed only if eligible saved tunnels include both roles. Backend choices include saved forwarding destinations, loopback, and VPS2's saved GRE/public IP. A new config asks for its Rathole name and connection port; an existing config reuses those values. If there are no eligible tunnels, setup prints repair commands before attempting installation.
 
 ```sh
 # On both hosts, install once (the wizard also handles this):
@@ -131,19 +132,23 @@ sudo twinlink rathole install --apply
 
 # On VPS1, using an already verified GRE tunnel:
 sudo twinlink rathole add app --tunnel edge \
-  --destination-address 127.0.0.1 --ports 8080:80,8443:443 --apply
+  --transport-port 2333 --destination-address 127.0.0.1 \
+  --ports 8080:80,8443:443 --apply
 
 # Copy the pairing_code from the result; on VPS2 paste it into this wizard:
 sudo twinlink rathole setup
 
 # Re-export after shared edits:
-sudo twinlink rathole pair-export app-8080 app-8443
-sudo twinlink rathole config app-8080
+sudo twinlink rathole pair-export app
+sudo twinlink rathole config app
+
+# Combine an older per-port setup, then import its fresh code on VPS2:
+sudo twinlink rathole consolidate app --tunnel edge --transport-port 2333 --apply
 ```
 
 The pairing text contains authentication tokens. Base64 and the corruption checksum provide no confidentiality or sender authentication. Transfer it privately. Routine status, diagnostics and previews redact tokens/private keys; setup results and explicit pairing exports intentionally show the transfer code.
 
-Default generated TOML path: `/var/lib/twinlink/rathole/NAME.toml`. `sudo vim /var/lib/twinlink/rathole/NAME.toml` edits it manually; reapply/boot restore regenerate it from saved state. For persistent changes, use `forward edit NAME ... --apply`, re-export/import and enable on both sides. Upgrade legacy TCP on VPS1 with `forward edit NAME --rathole-transport noise --apply`, then pair again.
+Default generated TOML path: `/var/lib/twinlink/rathole/NAME.toml`. `sudo vim /var/lib/twinlink/rathole/NAME.toml` edits it manually; reapply/boot restore regenerate it from saved state. For persistent forwarding changes, use `forward edit SERVICE ... --apply`, re-export/import and enable on both sides. Each service can stop/disable/delete independently; its section is omitted while siblings remain active. Config changes restart the shared process and briefly reconnect all its services. Shared name/connection-port/Noise changes use `rathole consolidate` on VPS1, then pairing again. Existing legacy records retain their separate configs until consolidated.
 
 ## Lifecycle commands
 

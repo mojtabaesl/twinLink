@@ -14,6 +14,8 @@ import json
 import re
 from pathlib import PurePosixPath
 
+from .rathole_groups import group_name, groups
+
 OWNERSHIP_MARKER = "# twinlink-owned"
 NFT_TABLE = "twinlink"
 MAX_PORT_RANGE = 256
@@ -205,9 +207,45 @@ def render_rathole(entry: dict, tunnel: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_rathole_group(entries: list[dict], tunnel: dict) -> str:
+    """One process/listener/keypair, with a service section per running forward."""
+    first = entries[0]
+    name = _name(group_name(first))
+    _, side, token, _, _, transport = _rathole_parameters(first, tunnel)
+    role = "server" if side == "vps1" else "client"
+    endpoint = _private(tunnel["local_private"] if side == "vps1" else tunnel["remote_private"])
+    lines = [f"{OWNERSHIP_MARKER} rathole={name}", "# Contains secrets. Keep root-owned with mode 0600.",
+             f"[{role}]", f'{"bind_addr" if side == "vps1" else "remote_addr"} = {_quoted(f"{endpoint}:{transport}")}',
+             f"default_token = {_quoted(token)}"]
+    if first.get("rathole_transport") == "noise":
+        from .rathole import key
+        field = "local_private_key" if side == "vps1" else "remote_public_key"
+        value = key(first.get("noise_private_key" if side == "vps1" else "noise_public_key"))
+        lines += ["", f"[{role}.transport]", 'type = "noise"', "", f"[{role}.transport.noise]", f"{field} = {_quoted(value)}"]
+    if not any(entry["running"] for entry in entries):
+        lines += ["", f"[{role}.services]"]
+    for entry in sorted(entries, key=lambda item: item["name"]):
+        fields = ("tunnel", "transport_port", "noise_public_key", "noise_private_key")
+        if group_name(entry) != name or any(entry.get(field) != first.get(field) for field in fields) or entry.get("rathole_transport", "tcp") != first.get("rathole_transport", "tcp"):
+            raise ValueError("Rathole group services must share their connection settings")
+        service, _, service_token, bind, destination, _ = _rathole_parameters(entry, tunnel)
+        if not entry["running"]:
+            lines.append(f"# Service {service} is stopped; enable/start it through twinlink.")
+            continue
+        lines += ["", f"[{role}.services.{_quoted(service)}]", 'type = "tcp"']
+        if service_token != token:
+            lines.append(f"token = {_quoted(service_token)}")
+        if side == "vps1":
+            lines.append(f"bind_addr = {_quoted(_ipv4(entry['bind_address']) + ':' + str(bind))}")
+        else:
+            lines.append(f"local_addr = {_quoted(_ipv4(entry['destination_address']) + ':' + str(destination))}")
+    return "\n".join(lines) + "\n"
+
+
 def render_rathole_unit(entry: dict, tunnel: dict, state_dir: str = "/var/lib/twinlink", binary: str = "/usr/local/bin/rathole") -> str:
     """No shell and no secret argv. Boot ordering is coordinated by restore."""
-    name, _, _, _, _, _ = _rathole_parameters(entry, tunnel)
+    _rathole_parameters(entry, tunnel)
+    name = _name(group_name(entry))
     config = rathole_config_path(name, state_dir)
     # Do not add Requires/BindsTo: a mutation may start this process while the
     # GRE callback/restore job is active. The engine verifies the GRE interface
@@ -358,15 +396,13 @@ def render_files(state: dict, state_dir: str = "/var/lib/twinlink", unit_dir: st
         if name != tunnel.get("name"):
             raise ValueError("tunnel name does not match its state key")
         files[str(PurePosixPath(unit_dir) / tunnel_unit_name(name))] = {"content": render_tunnel_unit(tunnel, executable, **runtime_options), "mode": 0o644}
-    for name, entry in sorted(state.get("forwards", {}).items()):
-        if name != entry.get("name"):
-            raise ValueError("forward name does not match its state key")
-        if entry.get("mode") != "rathole":
-            continue
+    for name, entries in sorted(groups(state).items()):
+        entry = entries[0]
         tunnel = state.get("tunnels", {}).get(entry.get("tunnel"))
         if tunnel is None:
             raise ValueError(f"forward {name} references a missing tunnel")
-        files[rathole_config_path(name, state_dir)] = {"content": render_rathole(entry, tunnel), "mode": 0o600}
+        content = render_rathole_group(entries, tunnel) if any("rathole_group" in item for item in entries) else render_rathole(entry, tunnel)
+        files[rathole_config_path(name, state_dir)] = {"content": content, "mode": 0o600}
         files[str(PurePosixPath(unit_dir) / rathole_unit_name(name))] = {"content": render_rathole_unit(entry, tunnel, state_dir, rathole_binary), "mode": 0o644}
     files[str(PurePosixPath(state_dir) / "managed.nft")] = {"content": render_nft(state), "mode": 0o600}
     files[str(PurePosixPath(unit_dir) / "twinlink-restore.service")] = {"content": render_restore_unit(executable, **runtime_options), "mode": 0o644}

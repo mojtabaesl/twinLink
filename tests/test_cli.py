@@ -253,9 +253,13 @@ class CLITests(unittest.TestCase):
         saved = self.store.read()
         self.assertEqual(set(saved["forwards"]), {"app-8080", "app-8443"})
         tokens = {entry["token"] for entry in saved["forwards"].values()}
-        self.assertEqual(len(tokens), 2)
+        self.assertEqual(len(tokens), 1)
         self.assertEqual(saved["forwards"]["app-8080"]["noise_private_key"], PRIVATE)
-        self.assertIn('type = "noise"', (self.state_dir / "rathole/app-8080.toml").read_text())
+        config = (self.state_dir / "rathole/app.toml").read_text()
+        self.assertIn('type = "noise"', config)
+        self.assertIn('[server.services."app-8080"]', config)
+        self.assertIn('[server.services."app-8443"]', config)
+        self.assertEqual(len(list((self.state_dir / "rathole").glob("*.toml"))), 1)
 
     def test_noise_import_applies_bundle_and_enable_without_generating_keys(self):
         source, peer = noise_pair()
@@ -329,7 +333,7 @@ class CLITests(unittest.TestCase):
 
     def test_setup_reads_saved_gre_and_applies_without_asking_for_names_or_ips(self):
         self.create_verified_gre()
-        answers = iter(["", "9090:90", "apply"])
+        answers = iter(["my-rathole", "2444", "", "9090:90", "apply"])
         prompts = []
         def read(prompt):
             prompts.append(prompt)
@@ -338,13 +342,15 @@ class CLITests(unittest.TestCase):
         with patch("builtins.input", side_effect=read), patch("twinlink.menu.os.path.exists", side_effect=lambda path: str(path) == "/usr/local/bin/rathole" or exists(path)), patch.object(cli.rathole, "generate_keypair", return_value=KEYS):
             code, result = self.invoke(["rathole", "setup"], parse_json=False)
         self.assertEqual(code, 0, result)
-        entry = self.store.read()["forwards"]["edge-rathole"]
+        entry = self.store.read()["forwards"]["my-rathole-9090"]
         self.assertEqual(entry["tunnel"], "edge")
         self.assertEqual(entry["bind_address"], "198.51.100.1")
         self.assertEqual(entry["destination_address"], "127.0.0.1")
         self.assertEqual(entry["bind_port"], "9090")
         self.assertTrue(entry["running"])
-        self.assertEqual(len(prompts), 3)
+        self.assertEqual(entry["rathole_group"], "my-rathole")
+        self.assertEqual(entry["transport_port"], 2444)
+        self.assertEqual(len(prompts), 5)
 
 
 if __name__ == "__main__":

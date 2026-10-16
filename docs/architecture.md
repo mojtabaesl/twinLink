@@ -9,6 +9,7 @@ The CLI treats a GRE tunnel and its forwarding entries as separate resources. Ea
 | `models.py` | Normalize records, validate names/addresses/ranges, reserve ports and detect managed conflicts. |
 | `pairing.py` | Bounded checksummed exchange, side reversal, peer matching and revision checks. |
 | `rathole.py` | Pinned upstream binary installation, version/Noise checks, native X25519 key generation and port-mapping parsing. |
+| `rathole_groups.py` | Map forwarding records to shared Rathole process/config identities, including legacy standalone records. |
 | `render.py` | Pure systemd, rathole and nftables rendering with explicit ownership markers. |
 | `host.py` | Shell-free command execution, kernel/socket/service observations and health diagnostics. |
 | `store.py` | Private atomic persistence, symlink rejection and exclusive mutation lock. |
@@ -46,7 +47,11 @@ flowchart LR
 
 Kernel mode applies DNAT on VPS1 to the peer GRE address and a per-entry relay port/range, then DNAT on VPS2 to its reachable backend. Return traffic uses managed SNAT/masquerade. MTU is configured per GRE tunnel and inspected with path-MTU diagnostics. Relay ranges reserve a maximum of 256 ports and remain reserved by stopped/disabled records. A singleton backend port maps a whole public range to that port; otherwise range widths must agree. IPv4 forwarding is enabled when required and its previous value is captured for transaction rollback.
 
-Rathole mode uses one service and strong token per entry. New CLI records default to Noise with native-generated X25519 keys; old records without a transport field remain TCP. VPS1 stores the private/public keypair and VPS2 stores only the server public key. The client authenticates the server with Noise NK. VPS1 listens for the rathole connection only on its private GRE address and separately binds the chosen public service tuple. VPS2 connects to that private GRE address and opens the destination connection locally. Its service identity, token and transport port must match VPS1. Generated TOML is private. TCP services are supported; UDP is rejected pending version-specific packet tests. Noise encrypts Rathole traffic inside GRE; GRE itself and kernel forwarding remain unencrypted.
+New Rathole setup records carry a `rathole_group`, identifying one TOML file, systemd process, GRE peer, transport port and Noise keypair for several forwarding services. New services share a strong `default_token`; consolidation can retain existing per-service tokens as overrides. VPS1 holds the Noise private/public keypair and VPS2 only its public key. Services sharing a group must agree on tunnel, side, transport and keys. Unrelated groups cannot reserve the same listener or reuse tokens. Legacy records without a group keep their original per-entry identity until explicitly consolidated; records without a transport remain TCP.
+
+Only running service sections are rendered into a shared config. The group process runs while any member is running and is enabled at boot while any member is enabled. Changes expand the transaction's affected set to all siblings, stop the shared process before writing TOML, restart it once, and snapshot/recover both old and new unit identities. Stopping/removing one service withdraws its public listener while siblings remain. Shared updates briefly reconnect all services. Consolidation preserves forwarding identities, moves them to a selected group/port, regenerates one Noise keypair, increments revisions and transactionally removes obsolete files/units. The peer receives the group metadata/public key in a fresh pairing bundle; private keys never leave VPS1.
+
+The client authenticates VPS1 with Noise NK. VPS1's connection listener binds to its private GRE address and each public service binds to its chosen public tuple. VPS2 connects over GRE and opens backend connections locally. Generated TOML is private. TCP services are supported; UDP is rejected pending version-specific packet tests. Noise encrypts Rathole traffic inside GRE; GRE itself and kernel forwarding remain unencrypted.
 
 ## Pairing and secrets
 

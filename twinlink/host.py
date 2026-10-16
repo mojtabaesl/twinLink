@@ -18,6 +18,8 @@ import subprocess
 import time
 from typing import Any
 
+from .rathole_groups import group_name, unit_name
+
 
 class HostError(RuntimeError):
     """A Linux prerequisite, command, or live safety check failed."""
@@ -511,7 +513,7 @@ class Host:
         return range(start, end + 1)
 
     def forward_status(self, entry: dict[str, Any], tunnel: dict[str, Any],
-                       probe: bool = True) -> dict[str, Any]:
+                       probe: bool = True, group_running: bool | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {"name": entry["name"], "mode": entry["mode"],
                                   "health": "down", "reason": "Forwarding is stopped.", "issues": [],
                                   "destination": {"reachable": None}, "drift": []}
@@ -522,12 +524,12 @@ class Host:
             side = entry.get("side", tunnel.get("side", "vps1"))
             try:
                 if entry["mode"] == "rathole":
-                    unit = self.unit_status(entry.get("unit", f"twinlink-rathole-{entry['name']}.service"))
+                    unit = self.unit_status(entry.get("unit", unit_name(entry)))
                     result["unit"] = unit
-                    if unit["active"]:
+                    if unit["active"] and ("rathole_group" not in entry or group_running is False):
                         result["drift"].append({"field": "rathole_unit", "desired": "inactive", "actual": "active"})
                     if side == "vps1":
-                        owned = [item for item in self.listeners() if item.get("managed") == entry["name"]
+                        owned = [item for item in self.listeners() if item.get("managed") == group_name(entry)
                                  and item.get("protocol") == entry["protocol"]
                                  and item.get("port") in self._port_range(entry["bind_port"])]
                         result["public_listener"] = bool(owned)
@@ -559,7 +561,7 @@ class Host:
             result["issues"].append("tunnel_unverified")
         side = entry.get("side", tunnel.get("side", "vps1"))
         if entry["mode"] == "rathole":
-            unit = self.unit_status(entry.get("unit", f"twinlink-rathole-{entry['name']}.service"))
+            unit = self.unit_status(entry.get("unit", unit_name(entry)))
             result["unit"] = unit
             if not unit["active"]:
                 result["issues"].append("rathole_unit_failure")
@@ -672,15 +674,15 @@ class Host:
                        "evidence": [self._evidence(command) for command in commands]})
 
     def diagnose_forward(self, entry: dict[str, Any], tunnel: dict[str, Any],
-                         config_path: str | None = None) -> dict[str, Any]:
-        unit = entry.get("unit", f"twinlink-rathole-{entry['name']}.service")
+                         config_path: str | None = None, group_running: bool | None = None) -> dict[str, Any]:
+        unit = entry.get("unit", unit_name(entry))
         commands = [["ss", "-H", "-lntu"], ["ss", "-H", "-nt", "state", "established"],
                     ["nft", "-j", "list", "ruleset"]]
         if entry["mode"] == "rathole":
             commands += [["systemctl", "show", unit, "--no-pager"],
                          ["systemctl", "cat", unit, "--no-pager"],
                          ["journalctl", "-u", unit, "--no-pager", "-n", "60"]]
-        result = {"name": entry["name"], "status": self.forward_status(entry, tunnel),
+        result = {"name": entry["name"], "status": self.forward_status(entry, tunnel, group_running=group_running),
                   "tunnel": self.diagnose_tunnel(tunnel),
                   "evidence": [self._evidence(command) for command in commands]}
         if config_path:

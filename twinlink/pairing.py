@@ -18,6 +18,7 @@ import struct
 import zlib
 
 from .models import ValidationError, empty_state, validate_forward, validate_tunnel
+from .rathole_groups import group_name, groups
 
 MAX_DECODED_SIZE = 65536
 MAX_CODE_SIZE = 131072
@@ -25,7 +26,7 @@ TUNNEL_PREFIX = "v1."
 FORWARD_PREFIX = "f1."
 RATHOLE_PREFIX = "r1."
 _TUNNEL_FIELDS = ("name", "side", "local_public", "remote_public", "local_private", "remote_private", "key", "mtu", "ttl")
-_FORWARD_FIELDS = ("name", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "token", "transport_port", "relay_port", "revision", "rathole_transport", "noise_public_key")
+_FORWARD_FIELDS = ("name", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "token", "transport_port", "relay_port", "revision", "rathole_transport", "noise_public_key", "rathole_group")
 
 
 def _encode(kind, payload):
@@ -156,7 +157,7 @@ def _matching_tunnel(source, state):
     return matches[0]
 
 
-def import_forward(code, state, name=None):
+def import_forward(code, state, name=None, replacement_names=()):
     """Match the local peer tunnel and validate a stopped forwarding record.
 
     A matching existing name is an explicit configuration replacement, with its
@@ -182,7 +183,8 @@ def import_forward(code, state, name=None):
         if not existing or existing.get("noise_public_key") != entry["noise_public_key"]:
             raise ValidationError("Create Noise forwarding on VPS1 first; the server private key never leaves VPS1")
         entry["noise_private_key"] = existing.get("noise_private_key")
-    return validate_forward(entry, state, existing_name=entry["name"] if existing else None)
+    validation_state = {**state, "forwards": {key: value for key, value in state["forwards"].items() if key not in replacement_names}}
+    return validate_forward(entry, validation_state, existing_name=entry["name"] if existing else None)
 
 
 def preview_forward(code, state, name=None):
@@ -197,10 +199,17 @@ def preview_forward(code, state, name=None):
 
 def export_rathole(entries, state):
     """One explicit secret code for several forwards, without server private keys."""
-    if not 1 <= len(entries) <= 64 or any(entry["mode"] != "rathole" for entry in entries):
-        raise ValidationError("Rathole pairing requires 1–64 Rathole forwarding entries")
+    expanded = {}
+    saved_groups = groups(state)
+    for entry in entries:
+        members = saved_groups.get(group_name(entry), [entry]) if "rathole_group" in entry else [entry]
+        for member in members:
+            expanded[member["name"]] = member
     if len({entry["name"] for entry in entries}) != len(entries):
         raise ValidationError("Duplicate Rathole forwarding names")
+    entries = list(expanded.values())
+    if not 1 <= len(entries) <= 64 or any(entry["mode"] != "rathole" for entry in entries):
+        raise ValidationError("Rathole pairing requires 1–64 Rathole forwarding entries")
     codes = [export_forward(entry, state["tunnels"][entry["tunnel"]]) for entry in entries]
     return _encode("rathole", {"forwards": codes})
 
@@ -209,12 +218,17 @@ def import_rathole(code, state):
     payload = _decode(code, "rathole")
     if set(payload) != {"version", "kind", "forwards"} or not isinstance(payload["forwards"], list) or not 1 <= len(payload["forwards"]) <= 64:
         raise ValidationError("Invalid Rathole pairing bundle")
+    names = [decode_forward(item)["forward"]["name"] for item in payload["forwards"]]
+    if len(set(names)) != len(names):
+        raise ValidationError("Rathole pairing contains a duplicate name")
     candidate = copy.deepcopy(state)
+    for name in names:
+        candidate["forwards"].pop(name, None)
     records = []
     for item in payload["forwards"]:
-        record = import_forward(item, candidate)
+        record = import_forward(item, state, replacement_names=names)
         if record["mode"] != "rathole" or any(existing["name"] == record["name"] for existing in records):
             raise ValidationError("Rathole pairing contains a duplicate name or a non-Rathole forward")
-        candidate["forwards"][record["name"]] = record
+        candidate["forwards"][record["name"]] = validate_forward(record, candidate, existing_name=record["name"])
         records.append(record)
     return records

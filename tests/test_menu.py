@@ -92,7 +92,7 @@ class MenuTests(unittest.TestCase):
 
     def test_noise_setup_installs_then_batches_ports_without_manual_credentials(self):
         with patch("twinlink.menu.os.path.exists", return_value=False):
-            calls, output = self.run_script(["7", "", "8080:80,8443:443", "apply", "apply", "0"], state=setup_state())
+            calls, output = self.run_script(["7", "", "2444", "", "8080:80,8443:443", "apply", "apply", "0"], state=setup_state())
         self.assertEqual(calls[0][-2:], ["rathole", "install"])
         self.assertEqual(calls[1], calls[0] + ["--apply", "--yes"])
         self.assertIn("8080:80,8443:443", calls[2])
@@ -102,6 +102,7 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(calls[2][calls[2].index("add") + 1], "edge-rathole")
         self.assertEqual(calls[2][calls[2].index("--tunnel") + 1], "edge")
         self.assertNotIn("--bind-address", calls[2])
+        self.assertEqual(calls[2][calls[2].index("--transport-port") + 1], "2444")
         for prompt in self.prompts:
             for redundant in ("tunnel name", "name/prefix", "This server", "public IPv4", "private IPv4"):
                 self.assertNotIn(redundant, prompt)
@@ -132,7 +133,7 @@ class MenuTests(unittest.TestCase):
         state["tunnels"]["other"] = tunnel(name="other", key=42, local_private="10.78.0.1/30",
                                             remote_private="10.78.0.2/30", running=True)
         with patch("twinlink.menu.os.path.exists", return_value=True):
-            calls, output = self.run_script(["7", "2", "2", "8080:80", "apply", "0"], state=state)
+            calls, output = self.run_script(["7", "2", "", "", "2", "8080:80", "apply", "0"], state=state)
         command = calls[0]
         self.assertEqual(command[command.index("--tunnel") + 1], "other")
         self.assertEqual(command[command.index("--destination-address") + 1], "10.78.0.2")
@@ -140,12 +141,12 @@ class MenuTests(unittest.TestCase):
 
     def test_setup_offers_saved_public_ip_without_typing_it(self):
         with patch("twinlink.menu.os.path.exists", return_value=True):
-            calls, _ = self.run_script(["7", "3", "8080:80", "apply", "0"], state=setup_state())
+            calls, _ = self.run_script(["7", "", "", "3", "8080:80", "apply", "0"], state=setup_state())
         self.assertEqual(calls[0][calls[0].index("--destination-address") + 1], "203.0.113.2")
 
     def test_setup_only_prompts_for_ip_when_custom_backend_selected(self):
         with patch("twinlink.menu.os.path.exists", return_value=True):
-            calls, _ = self.run_script(["7", "0", "10.20.30.40", "8080:80", "apply", "0"], state=setup_state())
+            calls, _ = self.run_script(["7", "", "", "0", "10.20.30.40", "8080:80", "apply", "0"], state=setup_state())
         self.assertEqual(calls[0][calls[0].index("--destination-address") + 1], "10.20.30.40")
 
     def test_repeated_setup_exports_existing_names_without_install_or_port_prompts(self):
@@ -163,7 +164,7 @@ class MenuTests(unittest.TestCase):
         source["forwards"].pop("tls")
         with patch("twinlink.menu.os.path.exists", return_value=True):
             calls, output = self.run_script(["7", "2", "", "9000:90", "apply", "0"], state=source)
-        self.assertEqual(calls[0][calls[0].index("add") + 1], "edge-rathole-2")
+        self.assertEqual(calls[0][calls[0].index("add") + 1], "edge-rathole")
         self.assertEqual(calls[0][calls[0].index("--destination-address") + 1], "10.20.30.40")
         self.assertIn("Saved backend: 10.20.30.40", "\n".join(output))
 
@@ -218,9 +219,16 @@ class MenuTests(unittest.TestCase):
         record["name"] = "a" * 48
         state["tunnels"][record["name"]] = record
         with patch("twinlink.menu.os.path.exists", return_value=True):
-            calls, _ = self.run_script(["7", "", "65534:80,65535:443", "apply", "0"], state=state)
+            calls, _ = self.run_script(["7", "", "", "", "65534:80,65535:443", "apply", "0"], state=state)
         prefix = calls[0][calls[0].index("add") + 1]
         self.assertLessEqual(len(prefix + "-65535"), 48)
+
+    def test_consolidation_collects_one_name_and_connection_port_without_forwarding_prompts(self):
+        source, _ = noise_pair()
+        with patch("twinlink.menu.os.path.exists", return_value=True):
+            calls, output = self.run_script(["7", "3", "combined", "2555", "apply", "0"], state=source)
+        self.assertEqual(calls[0][-7:], ["rathole", "consolidate", "combined", "--tunnel", "edge", "--transport-port", "2555"])
+        self.assertFalse(any("Forwarding ports" in prompt or "Backend" in prompt for prompt in self.prompts))
 
 
 if __name__ == "__main__":

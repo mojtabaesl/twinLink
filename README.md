@@ -79,16 +79,18 @@ sudo twinlink rathole setup
 
 The wizard reads saved GRE configuration to detect this server's role and reuse both public/private endpoints. A single running, verified tunnel is selected automatically; with several VPS1 tunnels, choose one from a numbered list. No tunnel name or endpoint needs retyping.
 
-On **VPS1**, choose the backend from saved backend addresses, VPS2 loopback, its GRE private IP or its public IP. Only a different backend requires typing an address. Enter forwarding ports such as `8080:80,8443:443,9000`; a single number forwards to the same backend port. Names are generated automatically from the tunnel, e.g. `edge-rathole-8080`. The wizard installs Rathole when missing, generates service tokens and Noise keys, and configures every port together. Copy the resulting **`r1.` base64 pairing text**. On repeat runs, existing Rathole forwarding can be exported again without entering names, addresses or ports.
+On **VPS1**, enter a **Rathole name** (e.g. `edge-rathole`) and **connection port** (default `2333`). Choose the backend from saved backend addresses, VPS2 loopback, its GRE private IP or its public IP. Only a different backend requires typing an address. Enter forwarding ports such as `8080:80,8443:443,9000`; a single number forwards to the same backend port. Every forwarding service shares **one TOML config, one process/systemd unit, one connection port and one Noise keypair**, using a shared `default_token`. Service names are generated from the Rathole name and public port. Copy the resulting **`r1.` base64 pairing text**. Adding services to an existing config reuses its name, port and credentials.
+
+For older installations with separate configs per port, choose **Combine saved forwarding into one Rathole config** in the wizard. It asks for the shared name/port, removes the old configs/units transactionally, and prints fresh pairing text to import on VPS2. Existing forwarding tokens are preserved with service-specific overrides when needed. Re-exporting an existing setup requires no port/name/address entry. Updating a shared config briefly restarts all its services together.
 
 On **VPS2**, paste the text when prompted. The code identifies the matching saved GRE tunnel automatically. Review and apply once to configure/start all imported forwards and enable them at boot. You do not need to generate credentials or edit TOML. The code contains service tokens and Noise public keys; the server's private keys stay on VPS1. Treat the text as a secret: base64 does not encrypt it. A role question appears only when this host has saved eligible tunnels in both VPS roles.
 
 To display config paths and editor commands without opening an editor:
 
 ```sh
-sudo twinlink rathole config edge-rathole-8080
-# Default config: /var/lib/twinlink/rathole/edge-rathole-8080.toml
-# Edit manually: sudo vim /var/lib/twinlink/rathole/edge-rathole-8080.toml
+sudo twinlink rathole config edge-rathole
+# Shared config: /var/lib/twinlink/rathole/edge-rathole.toml
+# Edit manually: sudo vim /var/lib/twinlink/rathole/edge-rathole.toml
 ```
 
 Manual TOML edits are overwritten on reapply or boot restore. Use `forward edit` for persistent port/address changes, then generate a fresh Rathole pairing code. See [Rathole commands](docs/commands.md#rathole-installation-noise-and-base64-pairing).

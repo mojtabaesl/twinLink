@@ -7,6 +7,8 @@ import ipaddress
 import re
 import secrets
 
+from .rathole_groups import group_name
+
 
 class ValidationError(ValueError):
     """An operator supplied configuration cannot safely be applied."""
@@ -254,6 +256,8 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
             raise ValidationError("rathole token must contain 32–128 URL-safe letters, digits, underscores or hyphens")
         out["token"] = token
+        if entry.get("rathole_group") is not None:
+            out["rathole_group"] = _name(entry["rathole_group"])
         out["transport_port"] = _integer(entry.get("transport_port", default_transport_port(name)), "transport_port", 1024, 65535)
         transport = entry.get("rathole_transport", "tcp")
         if transport not in ("tcp", "noise"):
@@ -267,7 +271,7 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
             if side == "vps1" and require_noise_private:
                 out["noise_private_key"] = key(entry.get("noise_private_key"))
     else:
-        if entry.get("rathole_transport") is not None:
+        if entry.get("rathole_transport") is not None or entry.get("rathole_group") is not None:
             raise ValidationError("Noise transport applies only to rathole forwarding")
         width = last - first + 1
         relay_first = 20000 + int(hashlib.sha256(name.encode("ascii")).hexdigest()[:8], 16) % (40000 - width)
@@ -283,15 +287,21 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
     for other_name, other in state.get("forwards", {}).items():
         if other_name == existing_name:
             continue
+        shared = mode == "rathole" and other.get("mode") == "rathole" and group_name(out) == group_name(other)
+        if shared:
+            fields = ("tunnel", "side", "transport_port", "noise_public_key", "noise_private_key")
+            if (any(out.get(field) != other.get(field) for field in fields)
+                    or out.get("rathole_transport", "tcp") != other.get("rathole_transport", "tcp")):
+                raise ValidationError("Services in a Rathole group must share tunnel, transport port and Noise keys")
         if protocol == other.get("protocol") and _addresses_overlap(bind, other.get("bind_address")) and _overlap(bind_port, other.get("bind_port")):
             raise ValidationError(f"public bind overlaps forwarding entry {other_name!r}, including reserved disabled entries")
-        if mode == "rathole" and other.get("mode") == "rathole" and out["transport_port"] == other.get("transport_port"):
+        if not shared and mode == "rathole" and other.get("mode") == "rathole" and out["transport_port"] == other.get("transport_port"):
             own_network = ipaddress.IPv4Interface(tunnel["local_private"]).network
             other_tunnel = state["tunnels"][other["tunnel"]]
             if own_network == ipaddress.IPv4Interface(other_tunnel["local_private"]).network:
                 raise ValidationError(f"rathole GRE transport port conflicts with entry {other_name!r}")
-        if mode == "rathole" and other.get("mode") == "rathole" and out["token"] == other.get("token"):
-            raise ValidationError("each rathole forwarding entry requires a unique service token")
+        if not shared and mode == "rathole" and other.get("mode") == "rathole" and out["token"] == other.get("token"):
+            raise ValidationError("separate Rathole groups require different service tokens")
         # Public wildcard listeners also cover private GRE addresses. Compare
         # rathole's private VPS1 TCP listener with all canonical public binds.
         if mode == "rathole" and other.get("protocol") == "tcp" and other.get("bind_address") == "0.0.0.0" and _overlap(out["transport_port"], other["bind_port"]):
@@ -301,7 +311,7 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
         if tunnel_name == other.get("tunnel"):
             own_relay = out.get("relay_port", out.get("transport_port"))
             other_relay = other.get("relay_port", other.get("transport_port"))
-            if own_relay is not None and other_relay is not None and _overlap(own_relay, other_relay):
+            if not shared and own_relay is not None and other_relay is not None and _overlap(own_relay, other_relay):
                 # Rathole connects to VPS1 and kernel transit reaches VPS2.
                 # Reserve both ports anyway, including future side changes.
                 if protocol == other.get("protocol") or mode == "rathole" or other.get("mode") == "rathole":
@@ -309,10 +319,11 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
     # Only VPS1 exposes the public service; VPS2 must not conflict-check its
     # unrelated local listeners against a public address on the other host.
     if side == "vps1":
-        _listener_conflict(bind, bind_port, protocol, listeners, existing_name)
+        owner = group_name(out) if mode == "rathole" else existing_name
+        _listener_conflict(bind, bind_port, protocol, listeners, owner)
         if mode == "rathole":
             private_address = str(ipaddress.IPv4Interface(tunnel["local_private"]).ip)
-            _listener_conflict(private_address, out["transport_port"], "tcp", listeners, existing_name)
+            _listener_conflict(private_address, out["transport_port"], "tcp", listeners, owner)
             if _addresses_overlap(bind, private_address) and _overlap(bind_port, out["transport_port"]):
                 raise ValidationError("rathole public listener overlaps its own GRE connection listener")
     elif mode == "kernel":
