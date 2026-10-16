@@ -112,7 +112,7 @@ All Rathole forwards run over a verified GRE tunnel. Create Noise forwards on VP
 
 | Command | Explanation |
 | --- | --- |
-| `twinlink rathole setup` | Guided setup on either side: installation if missing, port prompts or pasted base64 text, preview/apply, and config paths. Also available from main menu option 7. |
+| `twinlink rathole setup` | Reuse saved roles, tunnels and endpoints; select among known backend addresses, enter forwarding ports or paste base64 text. Generates names and credentials, installs if missing, previews/applies and prints config paths. Repeat runs can re-export saved forwards. Also available from main menu option 7. |
 | `twinlink rathole install` | Preview installation of the official pinned 0.5.0 Linux x86_64/ARM64 release at `--rathole-binary`. Add `--apply` to download/install; compatible binaries are reused. |
 | `twinlink rathole install --sha256 HASH --apply` | Verify the downloaded ZIP archive against an optional trusted SHA256. This differs from the source installer's executable checksum. |
 | `twinlink rathole add NAME --tunnel TUNNEL --ports PORTS` | Preview a batch of Noise forwards on VPS1; add `--apply` to configure/start and enable at boot. Successful apply prints a single secret base64 pairing code. |
@@ -122,6 +122,8 @@ All Rathole forwards run over a verified GRE tunnel. Create Noise forwards on VP
 | `twinlink rathole config NAME` | Print the exact TOML path, quoted vim/nano commands and restart command. Never opens an editor. |
 
 Batch options: `--destination-address` defaults to `127.0.0.1` on VPS2; `--bind-address` defaults to VPS1's public endpoint; `--disabled` stores stopped/disabled forwards. `--ports 8080:80,8443:443,9000` creates three entries named `NAME-8080`, `NAME-8443`, and `NAME-9000`. One mapping uses `NAME` unchanged. Port/name conflicts fail the whole batch before applying.
+
+The interactive wizard selects a sole running/verified GRE tunnel automatically and uses its saved role and public/private addresses. Multiple VPS1 tunnels are listed by name and peer IP for numbered selection. VPS2's pairing text identifies its tunnel without a selector. A role selector is needed only if eligible saved tunnels include both roles. Backend choices include saved forwarding destinations, loopback, and VPS2's saved GRE/public IP; choose another address only for a different backend. The wizard generates an available `TUNNEL-rathole` name/prefix, adding a suffix when needed. The CLI `rathole add NAME ...` still accepts explicit names/addresses for scripts. If there are no eligible tunnels, setup prints repair commands for the saved tunnels before attempting installation.
 
 ```sh
 # On both hosts, install once (the wizard also handles this):

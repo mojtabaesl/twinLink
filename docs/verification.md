@@ -14,17 +14,19 @@ Verified on 16 October 2026 on the development Mac (Darwin arm64), with Python 3
 
 | Check | Result |
 | --- | --- |
-| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` | 191 collected: **184 passed, 7 skipped**. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` | 203 collected: **196 passed, 7 skipped**. |
 | Linux namespace tests collected by the full suite | All 7 skipped: Linux/root networking environment unavailable; integration opt-in absent. |
 | `sh -n scripts/install.sh scripts/uninstall.sh` | Passed. |
 | Python AST parsing | All 24 Python source files parsed. Unit tests import all implementation modules. |
 | `python3 scripts/package.py install --build-only dist/twinlink.pyz` | Built the executable archive. |
-| Packaged runtime smoke | Rathole subcommand/setup help and JSON install preview passed; preview created no state/destination directory. Packaging tests also cover success/error exit codes. |
+| Packaged runtime smoke | Rathole help/install preview and saved-state setup passed. Setup detected the saved role/tunnel, exported existing forwarding without name/IP/port prompts, exposed no private key, and left state unchanged. Packaging tests also cover success/error exit codes. |
 | `git diff --check` | Passed. |
 
 The unit suite uses a stateful simulated kernel for transaction tests. It checks failures, read-back mismatches, partial rollback, journal recovery, ownership refusals, real versus desired state, peer verification gates, listener conflicts, secondary binds, private-subnet route protection, secret redaction, revision edits, cascade deletion, and rathole's initial pending-peer state. It does not establish packet delivery.
 
 New tests cover several forwarding ports in one Noise pairing code, matching tokens/public keys, private-key exclusion from codes/client state/previews, preserving the server identity during reverse imports, legacy TCP compatibility, malformed/corrupt/duplicate/unverified-peer rejection, batch failure without partial commit, import enablement/boot intent, wizard install/cancel/error handling, config paths without editor invocation, mocked official-release installation/reuse, checksum/archive/version/download failures and symlink refusal. Download and native key generation tests use mocked responses; they do not verify a real download or handshake.
+
+Saved-state setup tests additionally cover automatic role/single-tunnel selection, numbered choices for multiple tunnels and known public/private/backend addresses, custom backend entry, reuse/export of existing forwarding, collision-free bounded generated names, client pairing without a tunnel selector, mixed-role selection, custom state paths, unavailable-tunnel repair guidance, invalid state, and a complete setup apply using a real private state file with the simulated kernel.
 
 ## Linux checks supplied but not executed here
 

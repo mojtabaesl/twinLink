@@ -327,6 +327,25 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 1, result)
         self.assertFalse(self.store.read()["forwards"])
 
+    def test_setup_reads_saved_gre_and_applies_without_asking_for_names_or_ips(self):
+        self.create_verified_gre()
+        answers = iter(["", "9090:90", "apply"])
+        prompts = []
+        def read(prompt):
+            prompts.append(prompt)
+            return next(answers)
+        exists = os.path.exists
+        with patch("builtins.input", side_effect=read), patch("twinlink.menu.os.path.exists", side_effect=lambda path: str(path) == "/usr/local/bin/rathole" or exists(path)), patch.object(cli.rathole, "generate_keypair", return_value=KEYS):
+            code, result = self.invoke(["rathole", "setup"], parse_json=False)
+        self.assertEqual(code, 0, result)
+        entry = self.store.read()["forwards"]["edge-rathole"]
+        self.assertEqual(entry["tunnel"], "edge")
+        self.assertEqual(entry["bind_address"], "198.51.100.1")
+        self.assertEqual(entry["destination_address"], "127.0.0.1")
+        self.assertEqual(entry["bind_port"], "9090")
+        self.assertTrue(entry["running"])
+        self.assertEqual(len(prompts), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

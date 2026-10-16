@@ -77,16 +77,18 @@ After pairing and verifying GRE on both servers (steps 1–2 below), run on each
 sudo twinlink rathole setup
 ```
 
-On **VPS1**, select create, enter the GRE name and backend address, then forwarding ports such as `8080:80,8443:443,9000`. A single number forwards to the same backend port. The wizard installs Rathole when missing, generates service tokens and Noise keys, and configures every port together. Copy the resulting **`r1.` base64 pairing text**.
+The wizard reads saved GRE configuration to detect this server's role and reuse both public/private endpoints. A single running, verified tunnel is selected automatically; with several VPS1 tunnels, choose one from a numbered list. No tunnel name or endpoint needs retyping.
 
-On **VPS2**, select paste and paste the text. Review and apply once to configure/start all imported forwards and enable them at boot. You do not need to generate credentials or edit TOML. The code contains service tokens and Noise public keys; the server's private keys stay on VPS1. Treat the text as a secret: base64 does not encrypt it.
+On **VPS1**, choose the backend from saved backend addresses, VPS2 loopback, its GRE private IP or its public IP. Only a different backend requires typing an address. Enter forwarding ports such as `8080:80,8443:443,9000`; a single number forwards to the same backend port. Names are generated automatically from the tunnel, e.g. `edge-rathole-8080`. The wizard installs Rathole when missing, generates service tokens and Noise keys, and configures every port together. Copy the resulting **`r1.` base64 pairing text**. On repeat runs, existing Rathole forwarding can be exported again without entering names, addresses or ports.
+
+On **VPS2**, paste the text when prompted. The code identifies the matching saved GRE tunnel automatically. Review and apply once to configure/start all imported forwards and enable them at boot. You do not need to generate credentials or edit TOML. The code contains service tokens and Noise public keys; the server's private keys stay on VPS1. Treat the text as a secret: base64 does not encrypt it. A role question appears only when this host has saved eligible tunnels in both VPS roles.
 
 To display config paths and editor commands without opening an editor:
 
 ```sh
-sudo twinlink rathole config app-8080
-# Default config: /var/lib/twinlink/rathole/app-8080.toml
-# Edit manually: sudo vim /var/lib/twinlink/rathole/app-8080.toml
+sudo twinlink rathole config edge-rathole-8080
+# Default config: /var/lib/twinlink/rathole/edge-rathole-8080.toml
+# Edit manually: sudo vim /var/lib/twinlink/rathole/edge-rathole-8080.toml
 ```
 
 Manual TOML edits are overwritten on reapply or boot restore. Use `forward edit` for persistent port/address changes, then generate a fresh Rathole pairing code. See [Rathole commands](docs/commands.md#rathole-installation-noise-and-base64-pairing).

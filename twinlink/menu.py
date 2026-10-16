@@ -3,6 +3,8 @@
 import os
 import shlex
 
+from .store import Store, StateError
+
 
 class _Cancelled(Exception):
     pass
@@ -43,6 +45,7 @@ def _global_arguments(args):
 class _Menu:
     def __init__(self, args, runner, read, write):
         self.globals = _global_arguments(args)
+        self.state_dir = getattr(args, "state_dir", "/var/lib/twinlink")
         self.runner, self.read, self.write = runner, read, write
 
     def prompt(self, label, default=None, required=False):
@@ -107,24 +110,97 @@ class _Menu:
         # ask the operator to confirm the same preview a second time in CLI.
         return self.invoke(clean + ["--apply", "--yes"])
 
+    def _rathole_tunnel(self, state):
+        eligible = sorted((tunnel for tunnel in state["tunnels"].values()
+                           if tunnel["verified"] and tunnel["running"]), key=lambda tunnel: tunnel["name"])
+        if not eligible:
+            self.write("No running, verified GRE tunnel is available. Create/pair GRE first, then start and verify it on both servers.")
+            for tunnel in sorted(state["tunnels"].values(), key=lambda tunnel: tunnel["name"]):
+                if not tunnel["running"]:
+                    self.write(_safe_command(self.globals + ["tunnel", "start", tunnel["name"], "--apply"]))
+                if not tunnel["verified"]:
+                    self.write(_safe_command(self.globals + ["tunnel", "check", tunnel["name"], "--record", "--apply"]))
+            return None
+        sides = {tunnel["side"] for tunnel in eligible}
+        if len(sides) == 1:
+            side = eligible[0]["side"]
+            self.write(f"Detected {side.upper()} from saved GRE configuration.")
+        else:
+            selected = self.choice("Saved tunnels have both roles; choose this setup's role", (
+                ("1", "VPS1: create/export forwarding"), ("2", "VPS2: paste pairing text")))
+            side = "vps1" if selected == "1" else "vps2"
+        if side == "vps2":
+            # Pairing import matches the saved mirrored GRE endpoints itself;
+            # there is no reason to ask the client to choose a tunnel again.
+            return {"side": side}
+        tunnels = [tunnel for tunnel in eligible if tunnel["side"] == side]
+        if len(tunnels) == 1:
+            tunnel = tunnels[0]
+        else:
+            selected = self.choice("Choose a saved GRE tunnel", tuple(
+                (str(index + 1), f"{tunnel['name']}: peer {tunnel['remote_public']} (GRE {tunnel['remote_private']})")
+                for index, tunnel in enumerate(tunnels)))
+            tunnel = tunnels[int(selected) - 1]
+        self.write(f"Using tunnel {tunnel['name']}: {tunnel['local_public']} ({tunnel['local_private']}) -> "
+                   f"{tunnel['remote_public']} ({tunnel['remote_private']}). Rathole connects over the saved GRE private addresses.")
+        return tunnel
+
+    def _rathole_destination(self, state, tunnel):
+        saved = sorted({entry["destination_address"] for entry in state["forwards"].values()
+                        if entry["tunnel"] == tunnel["name"]})
+        candidates = [(address, "Saved backend") for address in saved]
+        candidates += [("127.0.0.1", "VPS2 loopback"),
+                       (tunnel["remote_private"].split("/", 1)[0], "VPS2 GRE private IP"),
+                       (tunnel["remote_public"], "VPS2 public IP")]
+        addresses = []
+        for address, label in candidates:
+            if address not in [item[0] for item in addresses]:
+                addresses.append((address, label))
+        choices = tuple((str(index + 1), f"{label}: {address}") for index, (address, label) in enumerate(addresses))
+        selected = self.choice("Backend service address on/reachable from VPS2", choices + (("0", "Another IPv4 address"),), default="1")
+        if selected == "0":
+            return self.prompt("Other backend IPv4", required=True)
+        return addresses[int(selected) - 1][0]
+
     def rathole_setup(self):
-        from .rathole import port_mappings
-        self.write("Rathole over GRE with Noise encryption. Verify GRE on both servers first.")
+        from .rathole import forward_names, port_mappings
+        self.write("Rathole over GRE with Noise encryption. Reusing saved tunnel names, roles and endpoints.")
         self.write("Setup installs Rathole if needed and generates credentials automatically. No editor is opened.")
-        side = self.choice("This server", (("1", "VPS1: create forwarding and base64 pairing text"),
-                                           ("2", "VPS2: paste base64 pairing text")))
-        if side == "1":
-            name = self.prompt("Forwarding name/prefix", default="app")
-            tunnel = self.prompt("Verified GRE tunnel name", required=True)
-            destination = self.prompt("Backend IPv4 reachable from VPS2", default="127.0.0.1")
+        try:
+            state = Store(self.state_dir).read()
+        except (StateError, OSError) as exc:
+            self.write("Cannot read saved configuration: " + str(exc))
+            return 1
+        tunnel = self._rathole_tunnel(state)
+        if tunnel is None:
+            return 1
+        if tunnel["side"] == "vps1":
+            existing = sorted(entry["name"] for entry in state["forwards"].values()
+                              if entry["tunnel"] == tunnel["name"] and entry["mode"] == "rathole")
+            if existing:
+                selected = self.choice("Rathole forwarding already saved: " + ", ".join(existing), (
+                    ("1", "Export base64 pairing text for saved forwarding"), ("2", "Add forwarding ports")), default="1")
+                if selected == "1":
+                    self.write("Pairing text contains service tokens. Transfer it privately to VPS2.")
+                    return self.invoke(["rathole", "pair-export", *existing])
+            destination = self._rathole_destination(state, tunnel)
             while True:
                 ports = self.prompt("Forwarding ports PUBLIC:BACKEND, comma separated (e.g. 8080:80,8443:443; 9000 keeps the same port)", required=True)
                 try:
-                    port_mappings(ports)
+                    mappings = port_mappings(ports)
                     break
                 except ValueError as exc:
                     self.write(str(exc))
-            command = ["rathole", "add", name, "--tunnel", tunnel, "--destination-address", destination, "--ports", ports]
+            base = tunnel["name"][:32] + "-rathole"
+            counter = 1
+            while True:
+                suffix = "" if counter == 1 else f"-{counter}"
+                name = base[:42 - len(suffix)] + suffix
+                if not any(item in state["forwards"] for item in forward_names(name, mappings)):
+                    break
+                counter += 1
+            self.write("Forwarding names: " + ", ".join(forward_names(name, mappings)))
+            command = ["rathole", "add", name, "--tunnel", tunnel["name"], "--destination-address", destination, "--ports", ports]
         else:
             self.write("Pairing text contains service tokens. Paste it only on the intended peer.")
             code = self.prompt("Rathole base64 pairing text (r1.…)", required=True)
@@ -136,7 +212,7 @@ class _Menu:
             if installed != 0:
                 return installed
         result = self.execute(command, mutation=True)
-        if result == 0 and side == "1":
+        if result == 0 and tunnel["side"] == "vps1":
             self.write("Copy pairing_code above to VPS2 and run: sudo twinlink rathole setup")
         return result
 
