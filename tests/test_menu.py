@@ -285,3 +285,13 @@ class MenuTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PresentationMenuTests(unittest.TestCase):
+    def test_verbose_propagation_and_hidden_echo(self):
+        from twinlink.menu import _Menu
+        for verbose in (False, True):
+            calls, lines = [], []
+            menu = _Menu(argparse.Namespace(verbose=verbose, json=False), calls.append, lambda _: "", lines.append)
+            menu.execute(["status"])
+            self.assertEqual("--verbose" in calls[0], verbose)
+            self.assertEqual(any("twinlink " in line for line in lines), verbose)

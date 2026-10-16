@@ -2,7 +2,9 @@
 
 import os
 import shlex
+import sys
 
+from .presentation import prompt, style
 from .store import Store, StateError
 from .rathole_groups import groups
 
@@ -38,6 +40,8 @@ def _global_arguments(args):
             result.extend(("--" + field.replace("_", "-"), str(value)))
     if getattr(args, "json", False):
         result.append("--json")
+    if getattr(args, "verbose", False):
+        result.append("--verbose")
     if getattr(args, "no_systemd", False):
         result.append("--no-systemd")
     return result
@@ -45,14 +49,15 @@ def _global_arguments(args):
 
 class _Menu:
     def __init__(self, args, runner, read, write):
+        self.verbose = getattr(args, "verbose", False)
         self.globals = _global_arguments(args)
         self.state_dir = getattr(args, "state_dir", "/var/lib/twinlink")
         self.runner, self.read, self.write = runner, read, write
+        self.error = (lambda message: print(message, file=sys.stderr)) if write is print else write
 
     def prompt(self, label, default=None, required=False):
-        suffix = f" [{default}]" if default is not None else ""
         while True:
-            value = self.read(label + suffix + ": ").strip()
+            value = self.read(prompt(label, default)).strip()
             if value == "!":
                 raise _Cancelled()
             if not value and default is not None:
@@ -62,7 +67,7 @@ class _Menu:
             self.write("A value is required. Type ! to cancel this operation.")
 
     def choice(self, title, choices, default=None):
-        self.write("\n" + title)
+        self.write("\n" + style(title))
         for key, label in choices:
             self.write(f"  {key}) {label}")
         valid = {str(key) for key, _ in choices}
@@ -86,14 +91,15 @@ class _Menu:
             result = self.runner(self.globals + arguments)
             return 0 if result is None else result
         except SystemExit as exc:
-            self.write("Command was rejected; review the help or values above.")
+            self.error("Command was rejected; review the help or values above.")
             return exc.code if isinstance(exc.code, int) else 1
 
     def execute(self, arguments, mutation=False, private_export=False):
         # Even expert mode cannot skip the menu's preview/confirmation step.
         apply_flags = {"--" + option[:length] for option in ("apply", "yes") for length in range(1, len(option) + 1)}
         clean = [argument for argument in arguments if argument not in apply_flags]
-        self.write("\n" + _safe_command(self.globals + clean))
+        if self.verbose:
+            self.write("\n" + _safe_command(self.globals + clean))
         if private_export:
             self.write("This explicitly writes matching forwarding configuration, including a rathole token when present, to the selected private file.")
             if self.prompt("Type export to write the file; Enter cancels").lower() != "export":
@@ -172,7 +178,7 @@ class _Menu:
         try:
             state = Store(self.state_dir).read()
         except (StateError, OSError) as exc:
-            self.write("Cannot read saved configuration: " + str(exc))
+            self.error("Cannot read saved configuration: " + str(exc))
             return 1
         tunnel = self._forward_tunnel(state)
         if tunnel is None:
@@ -195,8 +201,6 @@ class _Menu:
                    "--protocol", "tcp" if protocol == "1" else "udp", "--bind-port", bind_port,
                    "--destination-address", destination, "--destination-port", destination_port]
         result = self.execute(command, mutation=True)
-        if result == 0:
-            self.write("Copy pairing_code above to VPS2 and run: sudo twinlink forward setup")
         return result
 
     def _install_rathole(self):
@@ -261,8 +265,6 @@ class _Menu:
         if installed != 0:
             return installed
         result = self.execute(command, mutation=True)
-        if result == 0:
-            self.write("Copy pairing_code above to VPS2 and run: sudo twinlink forward setup")
         return result
 
     def named(self, group, action, extra=(), mutation=False):
@@ -421,14 +423,14 @@ class _Menu:
             except _Cancelled:
                 self.write("Operation cancelled.")
             except (ValueError, StateError, OSError) as exc:
-                self.write("Forwarding setup failed: " + str(exc))
+                self.error("Forwarding setup failed: " + str(exc))
 
     def expert(self):
         self.write("Enter a twinlink subcommand without a shell or global options. Mutations still preview first.")
         try:
             command = shlex.split(self.prompt("Subcommand", required=True))
         except ValueError as exc:
-            self.write("Invalid command quoting: " + str(exc))
+            self.error("Invalid command quoting: " + str(exc))
             return
         if not command or command[0] not in {"tunnel", "forward", "rathole", "doctor", "status", "recover", "uninstall"}:
             self.write("Choose a tunnel, forward, rathole, doctor, status, recover or uninstall subcommand.")
@@ -508,7 +510,7 @@ def run_forward_setup(args, command_runner=None, input_fn=None, output_fn=None, 
         menu.write("\nSetup cancelled.")
         return 0
     except (ValueError, StateError, OSError) as exc:
-        menu.write("Forwarding setup failed: " + str(exc))
+        menu.error("Forwarding setup failed: " + str(exc))
         return 1
 
 

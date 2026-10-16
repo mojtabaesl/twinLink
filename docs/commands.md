@@ -144,7 +144,7 @@ sudo twinlink forward add app --mode rathole --tunnel edge \
   --transport-port 2333 --destination-address 127.0.0.1 \
   --ports 8080:80,8443:443 --apply
 
-# Copy the pairing_code from the result; on VPS2 paste it into this wizard:
+# Copy the pairing code from the result; on VPS2 paste it into this wizard:
 sudo twinlink forward setup
 
 # Re-export after shared edits:
@@ -240,3 +240,32 @@ Run scripts from the repository checkout.
 | `130` | Interrupted by the user. |
 
 `twinlink internal restore`, `twinlink internal tunnel-up NAME`, and `twinlink internal tunnel-down NAME` are callbacks for managed systemd units. Use the public lifecycle commands for routine operation.
+
+## Terminal output
+
+Commands show concise human summaries by default, including when redirected.
+Use `--verbose` for detailed, redacted JSON-style payloads, or `--json` for
+script-compatible JSON. `--json` takes precedence when both are supplied.
+Both flags work before the command group or after any public leaf command:
+
+```sh
+sudo twinlink --verbose status
+sudo twinlink tunnel show edge --verbose
+sudo twinlink forward check web --json --verbose
+```
+
+Titles and health words use color only on a terminal. Redirecting output,
+setting a nonempty `NO_COLOR`, or using `TERM=dumb` disables color. Detailed
+payloads and pairing-code lines are always uncolored. Default `pair-export`
+prints only the complete pairing code, suitable for piping.
+
+```text
+Preview: create tunnel edge
+  edge | Peer: 203.0.113.2 | GRE: 10.77.0.1/30 -> 10.77.0.2/30
+  Start now; enable at boot
+No changes applied. Repeat with --apply.
+```
+
+An applied result confirms configuration commit; use resource checks and an
+external traffic test to verify connectivity. Forward setup prints a complete
+pairing code on its own line followed by the peer setup command.

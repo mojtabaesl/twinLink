@@ -163,3 +163,13 @@ sudo scripts/uninstall.sh --purge-managed --cascade  # also remove tunnels & for
 python3 -m unittest discover -s tests -v          # run tests (no root needed)
 scripts/install.sh --build-only /tmp/twinlink.pyz  # build standalone archive
 ```
+
+### Readable terminal output
+
+Commands show concise summaries by default. Use `--verbose` for detailed
+redacted payloads or `--json` for scripts (`--json` takes precedence). Both
+flags work globally and after public leaf commands, for example
+`twinlink --verbose status` or `twinlink tunnel show edge --json`.
+Color is enabled only on terminals and disabled by nonempty `NO_COLOR` or
+`TERM=dumb`. Pairing codes remain complete and uncolored; default
+`pair-export` prints only the code. See [command output](docs/commands.md#terminal-output).

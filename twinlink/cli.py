@@ -13,6 +13,7 @@ from .engine import ApplyError, Engine, redacted
 from .host import Host, HostError
 from .models import ValidationError, validate_tunnel, validate_forward
 from . import pairing, rathole
+from .presentation import output
 from .render import rathole_config_path
 from .rathole_groups import group_name, groups
 from .store import Store, StateError, reject_symlink
@@ -21,16 +22,6 @@ from .store import Store, StateError, reject_symlink
 LIFECYCLE = ("enable", "disable", "start", "stop", "restart", "reapply", "delete")
 TUNNEL_FIELDS = ("side", "local_public", "remote_public", "local_private", "remote_private", "key", "mtu", "ttl")
 FORWARD_FIELDS = ("tunnel", "mode", "protocol", "bind_address", "bind_port", "destination_address", "destination_port", "relay_port", "transport_port", "rathole_transport", "rathole_group")
-
-
-def output(value, as_json=False):
-    value = redacted(value)
-    if as_json:
-        print(json.dumps(value, indent=2, sort_keys=True))
-    elif isinstance(value, str):
-        print(value)
-    else:
-        print(json.dumps(value, indent=2, sort_keys=True))
 
 
 def mutation_flags(parser):
@@ -184,6 +175,14 @@ def build_parser():
     internal = commands.add_parser("internal", help="Boot callbacks used by managed units")
     internal.add_argument("operation", choices=("restore", "tunnel-up", "tunnel-down"))
     internal.add_argument("name", nargs="?")
+    def add_verbose(current):
+        current.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS,
+                             help="Detailed redacted output (--json takes precedence)")
+        for entry in current._actions:
+            if isinstance(entry, argparse._SubParsersAction):
+                for child in entry.choices.values():
+                    add_verbose(child)
+    add_verbose(parser)
     return parser
 
 
@@ -473,6 +472,9 @@ def _internal(args, store, host, engine):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    public_context = (args.group, getattr(args, "action", ""), getattr(args, "name", "") or "")
+    def emit(value, as_json=False, **kwargs):
+        output(value, as_json, verbose=getattr(args, "verbose", False), context=None if args.group == "internal" else public_context, **kwargs)
     try:
         requested_action = args.group + " " + getattr(args, "action", "purge")
         args = _forward_command(args)
@@ -493,31 +495,31 @@ def main(argv=None):
         if args.group == "rathole" and args.action == "install":
             plan = rathole.install_plan(args.rathole_binary, args.sha256)
             if not args.apply:
-                output({**plan, "next": "Repeat with --apply to install Rathole"}, args.json)
+                emit({**plan, "next": "Repeat with --apply to install Rathole"}, args.json, phase="preview")
                 return 0
             _confirm(args)
             host.require_linux_root()
             with store.lock():
                 if store.journal.exists():
                     raise StateError("Recover the interrupted transaction before installing Rathole")
-                output(rathole.install(args.rathole_binary, args.sha256), args.json)
+                emit(rathole.install(args.rathole_binary, args.sha256), args.json)
             return 0
         if args.group == "doctor":
             report = host.dependency_report()
             report["platform"] = platform.system()
             report["rathole"] = {"path": args.rathole_binary, "installed": os.access(args.rathole_binary, os.X_OK), "supported_version": "0.5.0 TCP"}
             report["state_directory"] = str(store.directory)
-            output(report, args.json)
+            emit(report, args.json)
             return 0 if platform.system() == "Linux" and not report.get("missing_required") and report.get("systemd_runtime") else 1
         if args.group == "internal":
             return _internal(args, store, host, engine)
         if args.group == "recover":
             if not args.apply:
-                output({"pending": store.journal.exists(), "preview": "Restore the private journal's old state, managed files, GRE, rules, services, and sysctl", "next": "recover --apply --yes"}, args.json)
+                emit({"pending": store.journal.exists(), "preview": "Restore the private journal's old state, managed files, GRE, rules, services, and sysctl", "next": "recover --apply --yes"}, args.json)
                 return 0
             _confirm(args)
             with store.lock():
-                output(engine.recover(), args.json)
+                emit(engine.recover(), args.json, phase="applied")
             return 0
         state = store.read()
         if args.group == "forward" and args.action == "pair-export":
@@ -532,8 +534,8 @@ def main(argv=None):
                 code = pairing.export_forward(records[0], state["tunnels"][records[0]["tunnel"]])
             else:
                 raise ValidationError("Export one Kernel forwarding entry or one or more Rathole configs at a time")
-            if args.json:
-                output({"code": code, "contains_secret": records[0]["mode"] == "rathole", "contains_noise_private_key": False}, True)
+            if args.json or getattr(args, "verbose", False):
+                emit({"code": code, "contains_secret": records[0]["mode"] == "rathole", "contains_noise_private_key": False}, args.json)
             else:
                 print(code)
             return 0
@@ -542,7 +544,7 @@ def main(argv=None):
             record = members[0] if members else _get(state, "forward", args.name)
             if record["mode"] != "rathole":
                 raise ValidationError("This forwarding entry does not use Rathole")
-            output(config_instructions(args, record["name"], group_name(record)), args.json)
+            emit(config_instructions(args, record["name"], group_name(record)), args.json)
             return 0
         if args.group == "rathole" and args.action == "pair-export":
             records = {}
@@ -551,8 +553,8 @@ def main(argv=None):
                 for entry in members or [_get(state, "forward", name)]:
                     records[entry["name"]] = entry
             code = pairing.export_rathole(list(records.values()), state)
-            if args.json:
-                output({"code": code, "contains_secret": True, "contains_noise_private_key": False}, True)
+            if args.json or getattr(args, "verbose", False):
+                emit({"code": code, "contains_secret": True, "contains_noise_private_key": False}, args.json)
             else:
                 print(code)
             return 0
@@ -563,10 +565,10 @@ def main(argv=None):
                 view.group = group
                 for record in state[key].values():
                     result[key].append(inspect_record(view, state, host, engine, record))
-            output(result, args.json)
+            emit(result, args.json)
             return 0
         if args.group == "uninstall" and not args.purge_managed:
-            output({"managed_tunnels": list(state["tunnels"]), "managed_forwards": list(state["forwards"]),
+            emit({"managed_tunnels": list(state["tunnels"]), "managed_forwards": list(state["forwards"]),
                     "program_only": "scripts/uninstall.sh removes the command launcher, retaining the runtime needed by managed units",
                     "purge": "uninstall --purge-managed --cascade --apply --yes removes managed network resources first"}, args.json)
             return 0
@@ -574,14 +576,14 @@ def main(argv=None):
         if args.group != "rathole" and action in ("list", "show", "check", "diagnose"):
             if action == "list":
                 key = "tunnels" if args.group == "tunnel" else "forwards"
-                output([inspect_record(args, state, host, engine, r) for r in state[key].values()], args.json)
+                emit([inspect_record(args, state, host, engine, r) for r in state[key].values()], args.json)
                 return 0
             record = _get(state, args.group, args.name)
             if action == "diagnose":
                 result = host.diagnose_tunnel(record) if args.group == "tunnel" else host.diagnose_forward(
                     record, state["tunnels"][record["tunnel"]], rathole_config_path(group_name(record), str(store.directory)),
                     group_running=any(entry["running"] for entry in groups(state).get(group_name(record), [])) if record["mode"] == "rathole" else None)
-                output(result, args.json)
+                emit(result, args.json)
                 return 0
             result = inspect_record(args, state, host, engine, record)
             if action == "check" and getattr(args, "record", False):
@@ -590,12 +592,12 @@ def main(argv=None):
                 candidate = copy.deepcopy(state)
                 candidate["tunnels"][args.name]["verified"] = True
             else:
-                output(result, args.json)
+                emit(result, args.json)
                 return 0 if action != "check" or result["operational"].get("health") == "up" else 2
         elif action == "pair-export":
             code = pairing.export_tunnel(_get(state, "tunnel", args.name))
-            if args.json:
-                output({"code": code, "contains_forwarding_secrets": False}, True)
+            if args.json or getattr(args, "verbose", False):
+                emit({"code": code, "contains_forwarding_secrets": False}, args.json)
             else:
                 print(code)
             return 0
@@ -614,7 +616,7 @@ def main(argv=None):
                 stream.write(code + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            output({"exported": str(target), "mode": "0600", "revision": record["revision"],
+            emit({"exported": str(target), "mode": "0600", "revision": record["revision"],
                     "transfer": "Copy with scp over a verified SSH connection; import on the peer, inspect, then enable explicitly",
                     "contains_secret": record["mode"] == "rathole"}, args.json)
             return 0
@@ -638,15 +640,16 @@ def main(argv=None):
             # through a separate engine argument instead of contaminating records.
             engine.force = (args.group, args.name, action)
         plan = engine.plan(state, candidate, requested_action)
+        affected = engine.affected(state, candidate)
         if not args.apply:
             plan["next"] = "Repeat with --apply (and --yes for scripts) after reviewing this preview"
-            output(plan, args.json)
+            emit(plan, args.json, phase="preview", old=state, candidate=candidate, affected=affected)
             return 0
         if args.json:
             # JSON apply is one document so scripts never have to parse concatenated JSON.
             pass
         else:
-            output(plan)
+            emit(plan, phase="preview", old=state, candidate=candidate, affected=affected)
         _confirm(args)
         with store.lock():
             result = engine.apply(state, candidate, plan)
@@ -655,14 +658,14 @@ def main(argv=None):
             result["pairing_note"] = "Paste into twinlink forward setup on the peer. Rathole codes contain service tokens and Noise public keys; server private keys are excluded. Transfer privately."
             if setup_names:
                 result["configs"] = [config_instructions(args, setup_names[0], group_name(candidate["forwards"][setup_names[0]]))]
-        output({**result, "plan": plan} if args.json else result, args.json)
+        emit({**result, "plan": plan} if args.json else result, args.json, phase="applied", old=state, candidate=candidate, affected=affected)
         return 0
     except (ValidationError, StateError, HostError, ApplyError, OSError, ValueError) as exc:
         details = {"error": str(exc)}
         if getattr(exc, "rollback_errors", None):
             details["rollback_errors"] = exc.rollback_errors
-        output(details, getattr(args, "json", False))
+        emit(details, getattr(args, "json", False))
         return 1
     except KeyboardInterrupt:
-        output({"error": "Interrupted; inspect status and recover any unfinished transaction"}, getattr(args, "json", False))
+        emit({"error": "Interrupted; inspect status and recover any unfinished transaction"}, getattr(args, "json", False))
         return 130
