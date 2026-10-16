@@ -1,0 +1,184 @@
+# Command reference
+
+[README](../README.md) · [Operations guide](operations.md)
+
+Run administrative commands with `sudo`. Examples use tunnel `edge` and forwarding entry `web`. Replace names, addresses, ports, and paths as needed.
+
+## Applying changes and getting help
+
+Configuration and lifecycle changes **preview by default**. Review the plan, repeat with `--apply`, and type `apply` when prompted. Scripts require `--apply --yes`. Exports write their output immediately; they do not use these flags.
+
+```sh
+sudo twinlink forward stop web                 # Preview
+sudo twinlink forward stop web --apply         # Confirm interactively
+sudo twinlink forward stop web --apply --yes   # Apply without a prompt
+
+twinlink --help
+twinlink tunnel --help
+twinlink forward add --help
+twinlink --version
+```
+
+## General commands
+
+| Command | Explanation |
+| --- | --- |
+| `twinlink menu` | Open the guided interactive menu. |
+| `twinlink doctor` | Report networking dependencies, platform, systemd availability, and the configured rathole path. |
+| `twinlink status` | Show saved configuration and observed health for every managed tunnel and forward, including unfinished-transaction status. |
+| `twinlink recover` | Preview rollback of an interrupted transaction. Use `--apply` to restore the journal's prior state. |
+| `twinlink uninstall` | Show removal guidance and managed resource names. |
+| `twinlink uninstall --purge-managed --cascade` | Preview deletion of all managed tunnels and forwards. Add `--apply` to remove resources; use the uninstall script to remove program files. |
+
+## Tunnel commands
+
+| Command | Explanation |
+| --- | --- |
+| `twinlink tunnel create NAME [options]` | Define a GRE tunnel. Applying normally starts it and enables it at boot; `--disabled` stores it stopped and disabled. |
+| `twinlink tunnel edit NAME [options]` | Change selected tunnel fields. Shared changes clear verification and stop/disable dependent forwards; pair and verify again. |
+| `twinlink tunnel list` | List tunnel configuration and live status. |
+| `twinlink tunnel show NAME` | Inspect one tunnel's configuration and live status. |
+| `twinlink tunnel check NAME` | Check kernel configuration and probe the GRE peer. |
+| `twinlink tunnel check NAME --record --apply` | Record verification after the peer probe and kernel configuration checks pass. Required before adding forwarding. |
+| `twinlink tunnel diagnose NAME` | Gather peer, path MTU, and service diagnostics. |
+| `twinlink tunnel pair-export NAME` | Print the GRE pairing code; includes tunnel settings, excludes forwarding credentials. |
+| `twinlink tunnel pair-import --code CODE` | Decode a code, swap endpoints and side, and preview the peer tunnel. Applying starts/enables it but leaves it unverified. |
+| `twinlink tunnel pair-import --file PATH` | Read the pairing code from a file instead. |
+
+Tunnel creation requires `--side`, both public addresses, and both private addresses:
+
+```sh
+sudo twinlink tunnel create edge --side vps1 \
+  --local-public 198.51.100.10 --remote-public 203.0.113.20 \
+  --local-private 10.77.0.1/30 --remote-private 10.77.0.2/30 \
+  --key 424242 --mtu 1472 --ttl 64 --apply
+```
+
+| Create/edit option | Explanation |
+| --- | --- |
+| `--side vps1\|vps2` | Local role: public entry server or backend-side server. |
+| `--local-public ADDRESS` | This server's public IPv4 address. |
+| `--remote-public ADDRESS` | Peer server's public IPv4 address. |
+| `--local-private ADDRESS/PREFIX` | This server's private GRE address with subnet prefix. |
+| `--remote-private ADDRESS/PREFIX` | Peer GRE address; distinct RFC1918 host in the same subnet. |
+| `--key INTEGER` | Optional GRE key shared by both ends; does not provide authentication. |
+| `--mtu INTEGER` | GRE MTU; defaults to 1472 with a key or 1476 without one. Adjust for the underlay. |
+| `--ttl INTEGER` | Outer packet TTL; default 64. |
+| `--disabled` | Create only: store without starting or enabling at boot. |
+| `--clear-key` | Edit only: remove the GRE key. |
+
+Pair import accepts `--name NAME` to choose a local name and `--replace` to replace an existing tunnel. Replacement stops/disables its dependent forwarding entries. Inspect the preview first.
+
+## Forwarding commands
+
+| Command | Explanation |
+| --- | --- |
+| `twinlink forward add NAME [options]` | Add an entry attached to a verified GRE tunnel. Applying normally starts/enables it; use `--disabled` to store it inactive. |
+| `twinlink forward edit NAME [options]` | Change selected settings. Shared edits increment the revision and stop/disable the entry; export/import again before enabling both peers. |
+| `twinlink forward list` | List forwarding configuration and live status. |
+| `twinlink forward show NAME` | Inspect one forwarding entry. |
+| `twinlink forward check NAME` | Check GRE, mode-specific runtime/rules/listeners, and destination reachability. Test real traffic separately. |
+| `twinlink forward diagnose NAME` | Gather forwarding diagnostics, including service/configuration evidence. |
+| `twinlink forward export NAME --output PATH` | Write a new mode-0600 transfer file, including a rathole token when applicable. Parent directory must exist; existing files are not overwritten. |
+| `twinlink forward import --file PATH` | Preview the peer configuration matched to a verified mirrored tunnel. Applying imports it stopped. |
+
+Example kernel forward:
+
+```sh
+sudo twinlink forward add web --tunnel edge --mode kernel --protocol tcp \
+  --bind-address 198.51.100.10 --bind-port 8080 \
+  --destination-address 10.20.30.40 --destination-port 80 --apply
+```
+
+| Add/edit option | Explanation |
+| --- | --- |
+| `--tunnel NAME` | Required for add: local verified GRE tunnel. Association cannot change through edit. |
+| `--mode kernel\|rathole` | Required for add: forwarding engine. Mode cannot change through edit. |
+| `--protocol tcp\|udp` | Transport protocol; defaults to TCP. Rathole accepts TCP only. |
+| `--bind-address ADDRESS` | VPS1 public IPv4 address or `0.0.0.0`; defaults to VPS1's configured public tunnel endpoint. |
+| `--bind-port PORT_OR_RANGE` | Required for add: exposed public port. Kernel ranges support up to 256 ports; rathole accepts one port. |
+| `--destination-address ADDRESS` | Required for add: backend IPv4 address reachable from VPS2. Loopback is supported in rathole mode. |
+| `--destination-port PORT_OR_RANGE` | Required for add: backend port. Kernel ranges must match the bind width, or use one fixed destination port. |
+| `--relay-port PORT_OR_RANGE` | Kernel only: override the automatically allocated private relay port/range. Width must match the bind range. |
+| `--transport-port PORT` | Rathole only: override the automatically chosen private connection port. |
+| `--disabled` | Add only: store without starting or enabling at boot. |
+
+Forward import accepts `--name NAME` for a local name override. Rathole service names must remain identical on both hosts. Transfer files must have private permissions (`chmod 600 PATH`).
+
+## Lifecycle commands
+
+These actions work with **both** `tunnel` and `forward`:
+
+```sh
+sudo twinlink tunnel start edge --apply
+sudo twinlink forward disable web --apply
+```
+
+| Action | Explanation |
+| --- | --- |
+| `start NAME` | Start now, keeping the existing boot enablement setting. |
+| `stop NAME` | Stop now, keeping the existing boot enablement setting. Stopping a tunnel also stops its dependent forwards. |
+| `enable NAME` | Start now and enable at boot. Enabling a tunnel does not automatically start its stopped forwards. |
+| `disable NAME` | Stop now and disable at boot. Disabling a tunnel also stops/disables its dependent forwards. |
+| `restart NAME` | Force runtime reconciliation and leave the resource running, keeping boot enablement unchanged. |
+| `reapply NAME` | Reconcile desired configuration to repair drift, keeping saved runtime/boot intent. |
+| `delete NAME` | Remove the managed resource and its owned configuration. Tunnel dependencies require an explicit cascade choice. |
+
+Tunnel deletion choices:
+
+```sh
+# Refuse deletion if any forwards depend on this tunnel
+sudo twinlink tunnel delete edge --no-cascade --apply
+
+# Remove the tunnel and all its dependent forwards
+sudo twinlink tunnel delete edge --cascade --apply
+```
+
+## Global and inspection options
+
+Place global options **before** the command group:
+
+```sh
+sudo twinlink --json forward check web
+sudo twinlink --rathole-binary /opt/rathole/rathole forward start app --apply
+```
+
+| Option | Explanation |
+| --- | --- |
+| `--json` | Machine-readable output with secrets redacted; also accepted on public subcommands. |
+| `--state-dir PATH` | State, secrets, and journals; default `/var/lib/twinlink`. Use one managed installation per host namespace. |
+| `--unit-dir PATH` | Managed systemd unit directory; default `/etc/systemd/system`. |
+| `--runtime-path PATH` | Absolute runtime path used by units; default `/usr/local/libexec/twinlink-runtime`. |
+| `--rathole-binary PATH` | Supplied rathole 0.5.0 executable; default `/usr/local/bin/rathole`. |
+| `--version` | Print the CLI version and exit. |
+| `--help` | Show usage for the selected command. |
+
+`list` and `show` accept `--no-probe` to skip the peer probe; reachability then remains unknown. Mutations accept `--apply` and `--yes` as described above. The hidden `--no-systemd` option is reserved for isolated integration tests with `TWINLINK_TESTING=1`.
+
+## Installer and uninstaller
+
+Run scripts from the repository checkout.
+
+| Command or option | Explanation |
+| --- | --- |
+| `sudo scripts/install.sh` | Install dependencies, build the runtime, and install the command launcher. |
+| `scripts/install.sh --build-only PATH` | Build a standalone zipapp without installing; no root required. |
+| `sudo scripts/install.sh --skip-deps` | Check existing dependencies without package-manager changes. |
+| `sudo scripts/install.sh --rathole PATH` | Check a separately supplied rathole executable. |
+| `--rathole-sha256 HASH` | Installer: verify the supplied rathole executable against a trusted checksum. |
+| `--prefix PATH` | Installer/uninstaller: choose the installation prefix; default `/usr/local`. |
+| `sudo scripts/uninstall.sh` | Remove the launcher, retaining runtime/services when managed resources remain. |
+| `sudo scripts/uninstall.sh --purge-managed --cascade` | Remove managed resources transactionally, then remove program files. State/backups and external dependencies remain. |
+| `--yes` | Uninstaller: skip the managed purge confirmation. |
+| `--state-dir PATH`, `--unit-dir PATH` | Uninstaller: locate custom state and managed unit directories. |
+
+## Exit codes and internal commands
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Command succeeded; for health checks, the resource is up. |
+| `1` | Validation, host/dependency, state, or application error. |
+| `2` | A `check` reported health other than up, or argparse rejected CLI syntax. |
+| `130` | Interrupted by the user. |
+
+`twinlink internal restore`, `twinlink internal tunnel-up NAME`, and `twinlink internal tunnel-down NAME` are callbacks for managed systemd units. Use the public lifecycle commands for routine operation.
