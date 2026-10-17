@@ -38,11 +38,16 @@ def build_parser():
     parser.add_argument("--unit-dir", default="/etc/systemd/system", help="Managed unit directory")
     parser.add_argument("--runtime-path", default="/usr/local/libexec/twinlink-runtime", help="Absolute installed runtime used by units")
     parser.add_argument("--rathole-binary", default="/usr/local/bin/rathole", help="Rathole 0.5.0 executable/install path")
-    parser.add_argument("--paqet-binary", default="/usr/local/bin/paqet", help="Pinned prepared Paqet executable path")
+    parser.add_argument("--paqet-binary", default="/usr/local/bin/paqet", help="Pinned Paqet executable/install path")
     parser.add_argument("--no-systemd", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="group", required=True)
     from .v2_cli import register
     register(commands, mutation_flags)
+    paqet_parser = commands.add_parser("paqet", help="Install the pinned Paqet candidate without enabling traffic")
+    paqet_actions = paqet_parser.add_subparsers(dest="action", required=True)
+    install = paqet_actions.add_parser("install", help="Preview/install the checksum-pinned Linux release")
+    install.add_argument("--sha256", help="Optional archive checksum; must match the built-in release pin")
+    mutation_flags(install)
     for group in ("tunnel", "forward"):
         group_parser = commands.add_parser(group, help="1. Create and manage GRE tunnels" if group == "tunnel" else "2. Set up and manage port forwarding (Kernel or Rathole)")
         actions = group_parser.add_subparsers(dest="action", required=True)
@@ -516,6 +521,23 @@ def main(argv=None):
         host = Host()
         from . import v2_cli
         from .coordination import Pending
+        if args.group == "paqet":
+            from . import paqet
+            store.read()
+            plan = paqet.install_plan(args.paqet_binary, args.sha256)
+            if not args.apply:
+                v2_cli.emit({"status": "preview", **plan}, args)
+                return 0
+            _confirm(args)
+            host.require_linux_root()
+            with store.lock():
+                for journal in (store.journal, store.directory / "uninstall.json"):
+                    reject_symlink(journal)
+                if store.journal.exists() or (store.directory / "uninstall.json").exists():
+                    raise StateError("Finish interrupted recovery/uninstall before installing Paqet")
+                result = paqet.install(args.paqet_binary, store, args.sha256)
+            v2_cli.emit({"status": "complete", **result}, args)
+            return 0
         if args.group in v2_cli.GROUPS or args.group == "uninstall" and (store.directory / "uninstall.json").exists():
             if args.group == "setup" and not any((args.file, args.pair, args.vps1, args.vps2)) and sys.stdin.isatty():
                 from .menu import run_pair_setup
@@ -728,7 +750,7 @@ def main(argv=None):
         emit({**result, "plan": plan} if args.json else result, args.json, phase="applied", old=state, candidate=candidate, affected=affected)
         return 0
     except (ValidationError, StateError, HostError, ApplyError, OSError, ValueError) as exc:
-        versioned = args.group in {"setup", "pair", "profile", "service", "config", "system", "logs"} or locals().get("v2_state", {}).get("version") == 2 or locals().get("diagnostic_options", False)
+        versioned = args.group in {"setup", "pair", "profile", "service", "config", "system", "logs", "paqet"} or locals().get("v2_state", {}).get("version") == 2 or locals().get("diagnostic_options", False)
         if versioned:
             from .v2_cli import emit as emit_v2
             code = 2 if isinstance(exc, ValidationError) else 4 if isinstance(exc, StateError) else 1

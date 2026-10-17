@@ -198,6 +198,24 @@ class Ownership:
         self.save(ledger)
 
     @staticmethod
+    def binary_value(path):
+        path = Path(path)
+        reject_symlink(path)
+        if not path.exists():
+            return None
+        if not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+            raise StateError("Not a bounded regular executable: " + str(path))
+        checksum = hashlib.sha256()
+        total = 0
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                total += len(chunk)
+                if total > 32 * 1024 * 1024:
+                    raise StateError("Executable grew beyond its read limit: " + str(path))
+                checksum.update(chunk)
+        return {"sha256": checksum.hexdigest(), "mode": path.stat().st_mode & 0o7777}
+
+    @staticmethod
     def file_value(path):
         path = Path(path)
         reject_symlink(path)

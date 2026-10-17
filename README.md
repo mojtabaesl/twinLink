@@ -1,200 +1,216 @@
-![TwinLink — GRE tunneling for Linux, with kernel forwarding and rathole TCP](docs/assets/readme-banner.png)
-
 # TwinLink
 
-## V2 development release
-
-New installations can configure one pair and its services once, then manually
-select `gre-kernel`, `gre-rathole`, `direct-rathole`, or off. `direct-paqet`
-configuration generation is included but activation is gated pending trusted
-binary hashes and separate TCP/UDP packet qualification. This alpha has not
-been qualified on Linux/systemd VMs or real VPSs. See [v2 operations and current
-limits](v2-operations.md) and the [verification record](docs/verification.md).
-
-```sh
-sudo twinlink setup --pair edge --vps1 VPS1_IPV4 --vps2 VPS2_IPV4 --transport-port 3456
-# Review, then repeat with --apply --yes. Runtime stays off.
-sudo twinlink service add web --pair edge --ports 8081 --backend-address 10.20.30.40 --backend-ports 80
-sudo twinlink config regenerate --pair edge
-sudo twinlink pair export --pair edge --output /root/edge.p2
-```
-
-The shared port belongs to the pair. Editing `transport.port` stages a new
-immutable revision for all transports; the active revision remains selected
-until receipt-coordinated activation. Exports explicitly disclose credentials;
-setup never prints them. Existing v1 state is never migrated on read or upgrade.
-
-The sections below describe the retained **legacy v1** commands. After explicit
-v2 setup/migration, use `pair`, `service`, `profile`, and `config` instead.
-
-TwinLink connects two Linux VPSs through an IPv4 GRE tunnel and forwards public traffic from **VPS1** to services reachable from **VPS2**. Manage tunnels and forwarding with an interactive menu or a scriptable CLI.
+Configure two Linux VPSs once, then choose how traffic reaches your backend.
+VPS1 receives public connections; VPS2 connects them to your service.
 
 ```text
-Client → VPS1 (public port) → GRE tunnel → VPS2 → Backend service
+Client → VPS1 public port → selected profile → VPS2 → backend
 ```
 
-## How It Works
+**Version 2.0.0a1 is a development release.** Linux/systemd and real two-VPS
+acceptance are still unverified. Paqet activation is not available yet.
+See [tested behavior and remaining work](docs/verification.md).
 
-TwinLink sets up a private GRE tunnel between two Linux servers and then uses that tunnel to forward traffic:
+## Choose a profile
 
-```mermaid
-flowchart LR
-  Client[Client] -->|public IP:port| VPS1
-  VPS1 -->|GRE tunnel| VPS2
-  VPS2 -->|private network| Backend[Backend Service]
-```
+One profile runs per pair. Switching is manual; there is no automatic failover.
+Service mappings and the shared transport port are configured once per pair.
+Kernel forwarding uses GRE rather than a TCP/UDP transport connection.
 
-1. **Tunnel creation** — A GRE tunnel creates a private point-to-point link between VPS1 and VPS2 using their public IPs. Each side gets a private IP (e.g. `10.77.0.1` ↔ `10.77.0.2`).
+| Profile | Traffic | Connection between VPSs | Backend on VPS2 localhost |
+| --- | --- | --- | --- |
+| `direct-rathole` | TCP | Rathole with Noise encryption over public TCP | Yes |
+| `gre-rathole` | TCP | Rathole with Noise encryption over GRE | Yes |
+| `gre-kernel` | TCP / UDP | GRE with kernel forwarding; no encryption | No |
+| `direct-paqet` | Not available | Configuration generation only; activation is gated | Not qualified |
 
-2. **Port forwarding** — Traffic arriving on VPS1's public port is forwarded through the GRE tunnel to VPS2, which delivers it to the backend service. Two methods are available:
-   - **Kernel forwarding** — Uses nftables DNAT rules for TCP/UDP. Fast and lightweight, supports port ranges up to 256 ports.
-   - **Rathole forwarding** — Uses the [rathole](https://github.com/rapiz1/rathole) reverse proxy for TCP. Adds **Noise encryption** inside the tunnel and can reach services on VPS2's localhost.
+The walkthrough below uses **direct-rathole**. It does not require GRE.
 
-3. **Pairing** — Configuration is transferred between servers using base64 pairing codes (copy/paste). No SSH or direct connection between the CLI instances is needed.
+## Before you start
 
-4. **Persistence** — All tunnels and forwards are managed through systemd services that survive reboots.
+On both VPSs you need Linux with systemd, Python 3.9+, Git, and root access.
+The installer supports Debian/Ubuntu and Fedora/Rocky/Alma/RHEL and installs
+network tools. Rathole profiles also need a trusted **Rathole 0.5.0** executable
+with Noise support on both hosts.
 
-## Features
+Allow the chosen path in your provider and host firewalls:
 
-- Create, pair, monitor, and manage multiple GRE tunnels
-- Kernel (TCP/UDP) and Rathole (encrypted TCP) forwarding modes
-- Base64 pairing codes for easy peer setup — no SSH needed
-- Systemd integration for persistence across reboots
-- Preview changes before applying, with rollback on failure
-- Diagnostics: health checks, drift detection, `doctor` command
-- Interactive menu and scriptable CLI with JSON output
-- Zero Python dependencies — standard library only
+- This walkthrough: clients → VPS1 TCP `8081`, and VPS2 → VPS1 TCP `3456`.
+- GRE profiles additionally need IP protocol **47** between the VPSs. This is
+  an IP protocol number, not a TCP/UDP port.
+- The backend must be reachable from VPS2. Kernel forwarding cannot use a
+  loopback backend.
 
-## Requirements
+Replace the example addresses with the public IPv4 addresses assigned to your
+servers. Commands below use `--apply --yes` to execute changes; omit both flags
+to preview a mutation first. Exports write files immediately.
 
-On **both VPSs**:
+## 1. Install on both VPSs
 
-- Linux with systemd and Python **3.9+** (Debian/Ubuntu or Fedora/RHEL)
-- Root access
-- Firewall allowing **IP protocol 47 (GRE)** between the servers
-
-The installer handles required packages: iproute2, nftables, conntrack, and ICMP tools.
-
-## Installation
-
-Run on **both VPSs**:
+Install TwinLink, then prepare Rathole **before creating or importing a pair**:
 
 ```sh
 git clone https://github.com/mojtabaesl/twinLink.git
 cd twinLink
 sudo scripts/install.sh
-sudo twinlink doctor        # verify dependencies
+sudo twinlink rathole install --apply --yes
+twinlink --version
 ```
 
-Then use the interactive menu or follow the Quick Start:
+The Rathole bootstrap command downloads the pinned 0.5.0 release on Linux
+x86_64/ARM64, or validates an executable already at `/usr/local/bin/rathole`.
+It is available before pair setup/import. For a kernel-only setup, skip that
+command. See [manual/offline Rathole installation](docs/operations.md#rathole-installation)
+for other architectures or an already configured host.
+
+### Optional: install the Paqet candidate
+
+On either host, before or after pair setup:
 
 ```sh
-sudo twinlink menu
+sudo twinlink paqet install
+sudo twinlink paqet install --apply --yes
 ```
 
-## Quick Start
+This installs the pinned [alpha.21 Linux release](https://github.com/hanselime/paqet/releases/tag/v1.0.0-alpha.21)
+for x86_64/ARM64 at `/usr/local/bin/paqet`, verifying both archive and executable
+checksums. It reuses an unchanged matching binary and never overwrites a different
+one. **Installation does not enable Paqet traffic**: activation remains gated
+pending runtime/protocol qualification. You can skip this for the Rathole walkthrough.
+See [Paqet installation](docs/operations.md#paqet-installation) for custom paths and cleanup.
 
-This example forwards ports `8080→80` and `8443→443` on VPS1 to a backend on VPS2 using Rathole with Noise encryption.
+## 2. Create the pair on VPS1
 
-> [!NOTE]
-> Commands **preview** by default. Add `--apply` to commit changes.
-
-### 1. Create the tunnel
-
-**VPS1:**
+Choose a pair name and the shared transport port once:
 
 ```sh
-sudo twinlink tunnel create edge --side vps1 \
-  --local-public 198.51.100.10 --remote-public 203.0.113.20 \
-  --local-private 10.77.0.1/30 --remote-private 10.77.0.2/30 \
-  --key 424242 --mtu 1472 --ttl 64 --apply
+sudo twinlink setup --pair edge \
+  --vps1 198.51.100.1 --vps2 203.0.113.2 \
+  --transport-port 3456 --apply --yes
 ```
 
-Export the pairing code and run it on VPS2:
+The pair starts **off**. Do not run `setup` independently on VPS2; it will import
+VPS1's configuration in step 5.
+
+## 3. Add the service on VPS1
+
+This example assumes a TCP backend at `127.0.0.1:9000` on VPS2 that replies
+`PONG\n` to `PING\n`. You can use the [temporary test backend](docs/operations.md#test-backend),
+or replace the address, ports and probe bytes for your own application.
 
 ```sh
-# VPS1
-sudo twinlink tunnel pair-export edge
-
-# VPS2 — paste the code
-sudo twinlink tunnel pair-import --code 'v1.COMPLETE_CODE' --apply
+sudo twinlink service add echo --pair edge \
+  --protocol tcp --ports 8081 \
+  --backend-address 127.0.0.1 --backend-ports 9000 \
+  --probe-request-hex 50494e470a --probe-response-hex 504f4e470a \
+  --apply --yes
 ```
 
-Verify connectivity on **both**:
+`8081` is the client-facing port. `9000` is the backend port. `3456` connects the
+VPSs. A safe request/response probe is required before activation; an open port
+alone does not prove delivery. This loopback example is compatible with the
+Rathole profiles, not `gre-kernel`.
+
+## 4. Prepare and export on VPS1
 
 ```sh
-sudo twinlink tunnel check edge --record --apply
+sudo twinlink config regenerate --pair edge --apply --yes
+sudo twinlink pair status --pair edge
+sudo twinlink pair export --pair edge --output /root/edge.p2
 ```
 
-### 2. Install Rathole & add forwarding (VPS1)
+Preparation creates configs and guarded units without starting traffic.
+Export **after** preparation, because preparing initial Noise keys can create a
+new revision. Keep the export's returned `fingerprint` for the next step.
+The bundle contains credentials; transfer it privately.
+
+## 5. Import and prepare on VPS2
+
+Copy `/root/edge.p2` to VPS2. Compare the export's complete SHA256 fingerprint
+through an independently trusted channel, then replace `EXPECTED_SHA256` below
+with that value. Use the fingerprint printed by TwinLink, not a hash of the
+newline-terminated file.
 
 ```sh
-# Install rathole (one-time)
-sudo twinlink forward install-rathole --apply
-
-# Add forwarding — multiple ports in one config, Noise encryption is automatic
-sudo twinlink forward add app --mode rathole --tunnel edge \
-  --transport-port 2333 --destination-address 127.0.0.1 \
-  --ports 8080:80,8443:443 --apply
+sudo chmod 600 /root/edge.p2
+sudo twinlink pair import --pair edge --file /root/edge.p2 \
+  --expected-fingerprint EXPECTED_SHA256 --apply --yes
+sudo twinlink config regenerate --pair edge --apply --yes
 ```
 
-### 3. Pair forwarding (VPS2)
+Both hosts now have the same shared configuration. Traffic is still off.
 
-Copy the pairing code printed after step 2, then paste it on VPS2:
+## 6. Activate with both VPSs
+
+Check on **both** hosts:
 
 ```sh
-sudo twinlink forward setup
-# paste the r1.… code when prompted, review, and apply
+sudo twinlink profile check direct-rathole --pair edge
 ```
 
-Enable on **both** and test:
+Then begin on **VPS1 only**:
 
 ```sh
-sudo twinlink forward enable app --apply
-sudo twinlink forward check app
+sudo twinlink profile switch direct-rathole --pair edge \
+  --output /root/edge-step-01.json --apply --yes
 ```
 
-## Common Commands
+This starts a multi-step exchange, not a one-command activation:
 
-| Command                              | Purpose                                   |
-| ------------------------------------ | ----------------------------------------- |
-| `sudo twinlink menu`                 | Interactive management menu               |
-| `sudo twinlink status`               | Show all tunnels and forwards with health |
-| `sudo twinlink doctor`               | Check host dependencies                   |
-| `sudo twinlink forward setup`        | Guided Kernel or Rathole forwarding setup |
-| `sudo twinlink tunnel list`          | List tunnels                              |
-| `sudo twinlink forward list`         | List forwarding entries                   |
-| `sudo twinlink tunnel check edge`    | Check tunnel connectivity                 |
-| `sudo twinlink forward check web`    | Check forwarding health                   |
-| `sudo twinlink forward diagnose web` | Troubleshooting diagnostics               |
-| `sudo twinlink recover --apply`      | Roll back an interrupted transaction      |
+1. Read `next_host` and `next_command` in the response. `pending` / exit code 3
+   means another coordination step is needed.
+2. Copy the outgoing receipt privately to that host. Run its returned command,
+   replacing `RECEIPT` with the incoming file and `NEXT_RECEIPT` with a **new**
+   outgoing filename. Run administrative commands with `sudo`.
+3. Repeat as directed, including final acknowledgements, until the transaction
+   completes and neither host has a transition or `commit_pending` state.
 
-## Uninstall
+Have receipt transfer ready before starting: preflight evidence lasts five
+minutes, and target startup begins a **60-second verification budget** on each
+host. Expiry withdraws unverified runtime and requires recovery. Read the
+[activation and recovery guide](docs/operations.md#activation-and-recovery)
+if a step fails or expires.
+
+## 7. Verify delivery
+
+On both VPSs:
 
 ```sh
-sudo scripts/uninstall.sh                        # remove CLI only
-sudo scripts/uninstall.sh --purge-managed --cascade  # also remove tunnels & forwards
+sudo twinlink pair status --pair edge
+sudo twinlink doctor --pair edge
 ```
 
-## Documentation
+Then test `198.51.100.1:8081` from an independent client using your application's
+request and expected response. A committed selection or running process does
+not prove public reachability. `unknown` means evidence is missing.
 
-- [Command reference](docs/commands.md) — all commands, options, and exit codes
-- [Operations guide](docs/operations.md) — setup, pairing, maintenance, and recovery
-- [Architecture](docs/architecture.md) — packet paths, ownership, and transaction design
+## Everyday use
 
-## Development
+After setup or import, `sudo twinlink menu` opens Pairing, Services, Profiles,
+Status/Doctor and System/Cleanup. The CLI provides the same operations:
+
+| Task | Command |
+| --- | --- |
+| Inspect configuration | `sudo twinlink config show --pair edge` |
+| Watch and export diagnostics | `sudo twinlink doctor --pair edge --watch 5m --export /root/edge-report.json` |
+| Stage a shared port change on VPS1 | `sudo twinlink config set transport.port 4567 --pair edge --apply --yes` |
+| Begin coordinated shutdown on VPS1 | `sudo twinlink profile switch off --pair edge --output /root/edge-off-01.json --apply --yes` |
+| Inspect interrupted work | `sudo twinlink recover --pair edge` |
+| Preview local uninstall | `sudo twinlink uninstall --plan` |
+
+An edit stages a new revision; it does not change the running profile. Prepare
+on VPS1, export/import the edit, prepare on VPS2, then activate through the same
+receipt exchange. Follow all shutdown receipts before deletion or full uninstall.
+
+## Documentation and development
+
+- [Operations guide](docs/operations.md): backend example, edits, switching,
+  recovery, diagnostics, reboot and removal.
+- [Command reference](docs/commands.md): current commands, flags and exit codes.
+- [Architecture](docs/architecture.md): profiles, revisions, ownership and limits.
+- [Verification](docs/verification.md): checks run and acceptance work remaining.
 
 ```sh
-python3 -m unittest discover -s tests -v          # run tests (no root needed)
-scripts/install.sh --build-only /tmp/twinlink.pyz  # build standalone archive
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -q
+scripts/install.sh --build-only /tmp/twinlink.pyz
 ```
-
-### Readable terminal output
-
-Commands show concise summaries by default. Use `--verbose` for detailed
-redacted payloads or `--json` for scripts (`--json` takes precedence). Both
-flags work globally and after public leaf commands, for example
-`twinlink --verbose status` or `twinlink tunnel show edge --json`.
-Color is enabled only on terminals and disabled by nonempty `NO_COLOR` or
-`TERM=dumb`. Pairing codes remain complete and uncolored; default
-`pair-export` prints only the code. See [command output](docs/commands.md#terminal-output).

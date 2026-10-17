@@ -79,6 +79,8 @@ def restore_system(store, runtime, dependencies=False):
                     observed = runtime.host.unit_status(resource[len("unit-enable:"):])["enabled"]
                 elif row["type"] == "file":
                     observed = ledger.file_value(resource[len("file:"):])
+                elif row["type"] == "binary":
+                    observed = ledger.binary_value(resource[len("binary:"):])
                 else:
                     raise StateError("Recover runtime off first: " + resource)
                 row = ledger.reconcile(resource, observed, allow_before=True)
@@ -105,6 +107,15 @@ def restore_system(store, runtime, dependencies=False):
                     return runtime.host.unit_status(name)["enabled"]
                 for owner in row["owners"]:
                     ledger.release(resource, owner, current, restore)
+            elif row["type"] == "binary":
+                path = Path(resource[len("binary:"):])
+                def restore(before):
+                    if before is not None:
+                        raise StateError("Cannot remove a pre-existing executable: " + str(path))
+                    path.unlink(missing_ok=True)
+                    return ledger.binary_value(path)
+                for owner in row["owners"]:
+                    ledger.release(resource, owner, ledger.binary_value(path), restore)
             elif row["type"] == "file":
                 path = Path(resource[len("file:"):])
                 # Private configs normally remain, but durable restoration

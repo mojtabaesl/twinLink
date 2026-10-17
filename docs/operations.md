@@ -1,228 +1,345 @@
 # Operations guide
 
-[README](../README.md) · [Command reference](commands.md)
+[README](../README.md) · [Command reference](commands.md) · [Verification](verification.md)
 
-New schema-v2 deployments use the [v2 operations guide](../v2-operations.md).
-It documents one shared configuration, four profile manifests, authenticated
-bundles/phase receipts, off-only deletion, Paqet prerequisites, and release
-limitations. The v1 procedures below remain available until explicit offline
-`config migrate`; they cannot mutate a committed v2 installation.
+Use the [README walkthrough](../README.md#1-install-on-both-vpss) for a new pair.
+The order is: install both hosts → configure services on VPS1 → prepare VPS1 →
+export/import → prepare VPS2 → coordinate activation → verify real delivery.
+This guide covers the details needed after that walkthrough.
 
-twinLink is a Python standard-library CLI for an IPv4 GRE link between two Linux VPSs, with independent kernel or rathole forwarding entries on that link. Both servers keep their own configuration. There is an interactive menu and scriptable commands; no web panel or SOCKS proxy is included.
+## Rathole installation
 
-GRE connectivity must be checked successfully before adding forwarding. A locally UP interface alone does not satisfy that requirement. Kernel mode supports TCP/UDP and ranges of up to 256 ports. Rathole mode supports single-port TCP services; UDP is deliberately rejected until a selected rathole version has passed end-to-end verification.
+The README installs Rathole before pair creation/import, while the bootstrap
+installer command is available. It targets Linux x86_64/ARM64 and checks version
+0.5.0 and native Noise key generation. Supply `--sha256 HASH` when you have an
+independently trusted release **archive** checksum.
 
-## Install
-
-Use a systemd host with Python 3.9 or newer. The installer supports Debian/Ubuntu using `apt-get`, and Fedora/Rocky/Alma/RHEL using `dnf`. Suitable examples are Debian 12+, Ubuntu 22.04+ and Rocky 9+; older releases whose default Python is below 3.9 require an upgrade first. Administrative network operations require root.
-
-```sh
-sudo scripts/install.sh
-sudo twinlink doctor
-sudo twinlink menu
-```
-
-The installer installs `iproute2`/`iproute`, `nftables`, `conntrack`, and ICMP diagnostics. `--skip-deps` checks existing dependencies without changing packages. It builds the local checkout as a zipapp, installs a launcher at `/usr/local/bin/twinlink`, and keeps the runtime at `/usr/local/libexec/twinlink-runtime`. Managed systemd units use that runtime directly. No pip dependencies are needed.
-
-Rathole is optional. The supported version is **0.5.0**, with TCP services and Noise encryption. The setup wizard can install it automatically. To use a separately obtained executable instead, select a trusted binary and, preferably, compare its SHA256 with a trusted checksum:
+For an offline host, another architecture or an already configured pair, obtain
+a trusted Rathole 0.5.0 executable with Noise support separately. To place it at
+the default path (replace the source path):
 
 ```sh
-sudo scripts/install.sh --rathole /opt/rathole/rathole --rathole-sha256 TRUSTED_SHA256
-sudo twinlink --rathole-binary /opt/rathole/rathole doctor
+sudo install -m 755 /path/to/rathole /usr/local/bin/rathole
+/usr/local/bin/rathole --version
 ```
 
-The source installer checks this supplied executable. Alternatively, `sudo twinlink forward install-rathole --apply` downloads the official pinned release for Linux x86_64/ARM64, checks its version and Noise support, and installs it without overwriting an existing binary. Add `--sha256 HASH` for a trusted ZIP checksum. Pass `--rathole-binary` consistently when using a custom path. The default is `/usr/local/bin/rathole`.
+The source installer can validate an existing executable with
+`sudo scripts/install.sh --rathole /usr/local/bin/rathole`, optionally adding
+`--rathole-sha256 HASH` for its **executable** checksum. This option does not
+download or copy the binary. A custom executable path requires the global
+`--rathole-binary PATH` option on subsequent commands.
 
-Build without installing anything, including on a development Mac:
+Replacing a prepared binary invalidates its pin. For an existing active pair,
+stage a new revision, prepare and transfer it, then coordinate activation as
+described below; changing the executable alone does not authorize a restart.
+
+## Paqet installation
+
+Paqet installation is optional and does not activate a profile. On each host
+where you want the candidate binary:
 
 ```sh
-scripts/install.sh --build-only /tmp/twinlink.pyz
-python3 /tmp/twinlink.pyz --help
-python3 -m twinlink --help
+sudo twinlink paqet install
+sudo twinlink paqet install --apply --yes
 ```
 
-## Set up GRE on both VPSs
+The preview performs no download or native execution. Apply requires Linux/root,
+downloads only alpha.21 for x86_64/ARM64, and verifies the pinned archive and
+executable hashes before running `paqet version`. The installer reads one bounded
+regular executable from the tar archive; it does not unpack upstream configs,
+create services or change firewall settings. Existing different executables and
+symlinks are refused, not overwritten.
 
-Replace the example public addresses with addresses actually assigned to the servers. Allow IP protocol **47** (GRE, not TCP/UDP port 47) through both provider firewalls and host firewalls. Allow peer ICMP over the private GRE network for reachability checks. GRE supplies neither encryption nor authentication; its optional key separates tunnel configurations and is not a password.
+The default destination is `/usr/local/bin/paqet`. For a custom destination, put
+`--paqet-binary /absolute/path/paqet` before `paqet install`; the parent directory
+must exist. Optional `--sha256 HASH` confirms the built-in archive checksum and
+cannot substitute another release. Source pins come from the
+[pinned upstream release](https://github.com/hanselime/paqet/releases/tag/v1.0.0-alpha.21).
 
-On VPS1, create the desired configuration and inspect the preview:
+New installations are journaled with binary fingerprints for conditional removal.
+Retry the same install after interruption. A matching pre-existing executable is
+validated and reused without being adopted; edited binaries are preserved as
+cleanup conflicts. Full local uninstall removes the unchanged binary installed
+by TwinLink. The runtime binary qualification registry and TCP/UDP qualification
+gates remain unchanged: installing the candidate does not make `direct-paqet`
+activatable.
+
+## Test backend
+
+The README's TCP example uses `127.0.0.1:9000` on VPS2. For a disposable test,
+run this on **VPS2 in a separate terminal** and keep it running during preflight,
+activation and doctor checks:
 
 ```sh
-sudo twinlink tunnel create edge --side vps1 \
-  --local-public 198.51.100.10 --remote-public 203.0.113.20 \
-  --local-private 10.77.0.1/30 --remote-private 10.77.0.2/30 \
-  --key 424242 --mtu 1472 --ttl 64
+python3 - <<'PYTHON'
+import socketserver
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.request.settimeout(3)
+        if self.rfile.readline(16) == b"PING\n":
+            self.wfile.write(b"PONG\n")
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+with Server(("127.0.0.1", 9000), Handler) as server:
+    print("Test backend listening on 127.0.0.1:9000", flush=True)
+    server.serve_forever()
+PYTHON
 ```
 
-Run the same command with `--apply` to confirm and commit it, or add `--apply --yes` for unattended operation. Mutations otherwise produce a preview only. Inspect the listed commands, generated files/rules, verification and rollback actions before confirming.
+Stop it with Ctrl-C when finished. It is a temporary application, not a
+persistent backend installation. For your real service, use its address and a
+safe application-specific probe instead of the example bytes.
+
+After activation, test from a **third machine** (replace VPS1's address):
 
 ```sh
-sudo twinlink tunnel pair-export edge
+python3 - <<'PYTHON'
+import socket
+with socket.create_connection(("198.51.100.1", 8081), timeout=3) as client:
+    client.sendall(b"PING\n")
+    with client.makefile("rb") as response:
+        assert response.readline(16) == b"PONG\n"
+print("Service exchange passed")
+PYTHON
 ```
 
-Copy the full `v1.` code to VPS2. The GRE code contains endpoints, both private addresses, key, MTU and TTL; it excludes forwarding secrets. On VPS2:
+## Preparation and shared edits
+
+VPS1 owns shared settings. A change creates a new immutable revision; the
+running revision remains selected until a coordinated switch. VPS2 imports
+shared settings rather than re-entering addresses, ports or mappings.
+
+For one edit, on VPS1:
 
 ```sh
-sudo twinlink tunnel pair-import --code 'v1.COMPLETE_CODE'
-sudo twinlink tunnel pair-import --code 'v1.COMPLETE_CODE' --apply
+sudo twinlink config set transport.port 4567 --pair edge
+sudo twinlink config set transport.port 4567 --pair edge --apply --yes
+sudo twinlink config regenerate --pair edge --apply --yes
+sudo twinlink pair export --pair edge --output /root/edge-update.p2
 ```
 
-Import previews the decoded parameters and swaps public endpoints, private addresses and the side. The tunnel name may be changed with `--name`. Applying GRE creation or pairing import starts/enables the tunnel, but never marks it verified. `tunnel create --disabled` instead stores a stopped, disabled tunnel. Both private addresses must be distinct RFC1918 hosts in one subnet, with no overlap with another managed tunnel or conflicting host route.
-
-On **both** servers:
+Transfer the private file to VPS2, then:
 
 ```sh
-sudo twinlink tunnel start edge --apply
-sudo twinlink tunnel check edge
-sudo twinlink tunnel check edge --record --apply
-sudo twinlink tunnel enable edge --apply
+sudo chmod 600 /root/edge-update.p2
+sudo twinlink pair import --pair edge --file /root/edge-update.p2 --apply --yes
+sudo twinlink config regenerate --pair edge --apply --yes
 ```
 
-If VPS2 used a different name, use that local name there. `check --record --apply` records verification only after a successful GRE peer probe. Check latency, packet loss and the reported reason; diagnose a failed probe before proceeding. An interface UP flag is not proof of peer reachability. A keyed IPv4 GRE packet adds at least 28 bytes of overhead; choose MTU for the actual underlay and use diagnostics if large packets stall.
+For an established pair the stored management key authenticates the update.
+First import additionally requires the independently checked export fingerprint.
+Both hosts must use the same shared revision before activation.
 
-## Add and pair forwarding
-
-VPS1 exposes the public service and VPS2 reaches the backend. Each forwarding entry has its own stable name and local lifecycle. Create the backend service before starting the forward.
-
-Use **Port forwarding → Set up forwarding / add ports** from `sudo twinlink menu`, or run `sudo twinlink forward setup` directly. Both Kernel and Rathole use this flow. Saved GRE roles, tunnel names and addresses are reused. On VPS1, choose Kernel TCP/UDP or Rathole TCP with Noise. Kernel setup asks for a forwarding name, protocol, backend choice and public/backend port or range; relay ports are allocated automatically. Rathole setup asks for a config name/connection port and port mappings, installing its binary and generating credentials when needed. On VPS2, paste the resulting `f1.` or `r1.` code; the method and GRE peer are detected automatically. Review/apply starts the imported forwarding and enables it at boot. Config paths, health and lifecycle commands are in the same Forwarding menu. System tools contains overview, dependency checks, recovery and expert commands.
-
-For a TCP kernel forward on VPS1:
+If you made several edits before transferring, VPS2 needs each missing revision
+**in order**. For example, if VPS2 has revision 2 and VPS1 has revision 4, export
+3 and then 4 on VPS1 and import both in that order on VPS2:
 
 ```sh
-sudo twinlink forward add web --tunnel edge --mode kernel --protocol tcp \
-  --bind-address 198.51.100.10 --bind-port 8080 \
-  --destination-address 10.20.30.40 --destination-port 80 --apply
+sudo twinlink pair export --pair edge --revision 3 --output /root/edge-r3.p2
+sudo twinlink pair export --pair edge --revision 4 --output /root/edge-r4.p2
 ```
 
-The destination must be reachable from VPS2. Applying `forward add` normally starts/enables the local entry; use `--disabled` to store it inactive while arranging peer setup. The public bind may be VPS1's primary or secondary assigned address, or `0.0.0.0`; the engine validates assignment on VPS1. Kernel mode first translates VPS1's public tuple to a dedicated relay port on VPS2's GRE address, then translates that relay tuple to the backend on VPS2. It supplies return-path NAT without installing a backend route or altering a default route. The relay port is allocated deterministically; `--relay-port` can set a nonconflicting port or equal-sized range explicitly. A range such as `8000-8010` maps to a matching destination range, or to one fixed destination port. Use `--protocol udp` for UDP kernel forwarding.
+Prepare VPS1 before exporting the final revision, then prepare VPS2 after its
+final import. Preparation of initial Noise credentials can itself stage a new
+revision, so inspect `pair status` for the final number.
 
-For guided Rathole with Noise, run `sudo twinlink forward setup --mode rathole` on VPS1, and `sudo twinlink forward setup` on VPS2. On VPS1, enter a Rathole name and connection port (default 2333), choose a known backend address or enter a different one, then supply ports such as `8080:80,8443:443`. All services share one named config/process, transport port, default token and Noise keypair. Existing configs reuse their name/port/credentials when adding services. The wizard prints one `r1.` base64 pairing code; VPS2 matches its saved tunnel and imports the whole config with no name/port/IP re-entry. A host with both roles asks which role to use. Pairing text contains service tokens; transfer it privately. Noise private keys stay on VPS1. Existing `twinlink rathole` commands remain compatible.
+Regeneration captures local route/NIC/gateway facts, generated configs, binary
+hashes and guarded units. It cannot overwrite the active revision or run during
+a transition. After a binary/local-facts change or an update requiring new unit
+content, stage a new revision on VPS1 and follow the same preparation/transfer
+flow. The launch guard checks selected-revision configs and binary pins on every
+systemd start and automatic restart. Standby units remain disabled.
 
-To merge old configs, select **Combine saved forwarding into one Rathole config** in setup, or run `sudo twinlink forward consolidate app --tunnel edge --transport-port 2333 --apply` on VPS1. This retains service names/tokens, creates one shared Noise keypair, and transactionally removes old units/configs. Import the fresh pairing code on VPS2. Consolidation interrupts the old tunnel services until their peer settings agree. Later config updates briefly restart all services in that shared process; individual ports still support independent stop/disable/delete. Re-exporting existing settings requires no name/port prompts.
+Adding/editing/deleting a service follows this same flow. Removing the last
+service makes active profiles incompatible: coordinate off rather than activating
+an empty configuration. Kernel mappings support up to 256 expanded ports and
+matching-width or many-to-one ranges. Probe/config totals must fit revision and
+bundle limits; oversize edits are rejected before state changes.
 
-For scriptable Rathole TCP forwarding in one shared config:
+## Activation and recovery
+
+Check the intended profile on both hosts, then begin `profile switch` on VPS1.
+Neither `profile check` nor a preview changes runtime. A check is local and may
+execute your configured safe backend probes on VPS2; it does not contact the peer
+CLI or reconcile ownership journals.
+
+The applied switch returns an outgoing receipt plus `next_host`, `next_step` and
+`next_command`. Copy receipts privately and follow the returned commands. Replace
+`RECEIPT` with the incoming file and `NEXT_RECEIPT` with a new output filename;
+keep the returned transaction, revision and step. Exit 3 / `pending` is normal
+between steps, including final commit acknowledgements. Never treat an early
+local success as completion on both hosts.
+
+| Phase | What happens |
+| --- | --- |
+| Preflight | Both hosts validate matching revisions, prepared configs/binaries, ownership and probe recipes; VPS2 checks proposed backends. |
+| Quiesce | VPS1 withdraws exposure, then VPS2 stops. Both receipts are required before target startup. Existing connections end. |
+| Start | Target resources start in the selected profile's dependency order. |
+| Verify | Both hosts verify resources; VPS2 checks application exchanges through VPS1's published services. |
+| Commit | Selection and last-good state are recorded and final acknowledgements exchanged. |
+
+Keep clocks synchronized. Preflight/receipt evidence has a five-minute freshness
+window. Each target host arms a systemd timer before exposure; the verification
+budget is 60 seconds and includes manual transfer time after startup. Expiry
+withdraws the local unverified target even if the CLI has exited. It does not
+establish that the peer has stopped. Arrange receipt transfer before starting.
+
+If receipt delivery is interrupted, inspect:
 
 ```sh
-sudo twinlink --rathole-binary /opt/rathole/rathole forward add app \
-  --tunnel edge --mode rathole --transport-port 2333 \
-  --bind-address 198.51.100.10 --ports 8080:80,8443:443 \
-  --destination-address 127.0.0.1 --apply
+sudo twinlink recover --pair edge
+sudo twinlink pair status --pair edge
 ```
 
-Rathole runs a server on VPS1 and a client on VPS2. During first setup, VPS1 can commit its private connection listener while reporting `pending_peer`; its public service listener appears after the matching VPS2 client authenticates. A committed local setup is not a claim of forwarding health. This behavior follows the [selected upstream server implementation](https://github.com/rathole-org/rathole/blob/v0.5.0/src/server.rs). Its connection listener binds only to VPS1's private GRE address. Its public service listener uses the selected bind address and port. Each entry receives a strong token and a matching service name. `--transport-port` can override the private connection port if needed. Loopback backends are available in rathole mode because the client connects locally on VPS2.
+Outgoing receipts are also retained privately under
+`/var/lib/twinlink/journals/receipt-PAIR-TRANSACTION.json`. Retrying a completed
+local step returns its receipt without repeating that mutation. For an expired
+intermediate receipt, use the issuer's returned `refresh_command` with a new
+output filename. Refresh revalidates the phase; it does not extend the original
+preflight or verification budget.
 
-Rathole can also use `sudo twinlink forward pair-export app` and paste the resulting code into `forward setup` on the peer. After shared edits, generate/import a fresh code. To inspect paths without opening an editor, use `sudo twinlink forward config app`; the default file is `/var/lib/twinlink/rathole/app.toml`, editable with `sudo vim /var/lib/twinlink/rathole/app.toml`. Manual edits are regenerated on reapply/boot restore; use `forward edit` for persistent changes.
-
-For either mode, private file export is also available:
+A preflight-only transaction can be cancelled locally on **both** hosts:
 
 ```sh
-sudo install -d -m 700 /root/twinlink-transfer
-sudo twinlink forward export web --output /root/twinlink-transfer/web.pair
-sudo scp /root/twinlink-transfer/web.pair root@VPS2:/root/twinlink-transfer/web.pair
+sudo twinlink recover --pair edge --cancel-preflight --apply --yes
 ```
 
-Create the mode-0700 transfer directory on VPS2 first. Forward export files are mode 0600 and can contain rathole tokens. Keep exports and Rathole pairing text out of public backups and version control. The wizard accepts pasted text without putting it into shell history; CLI scripts can use `forward pair-import --file PATH` with private file permissions. Transfer `app` rather than `web` if using the rathole example. On VPS2, preview and import:
+After disruptive steps or verification expiry, begin coordinated rollback using
+the recovery instructions, for example on the indicated host:
 
 ```sh
-sudo twinlink forward import --file /root/twinlink-transfer/web.pair
-sudo twinlink forward import --file /root/twinlink-transfer/web.pair --apply
+sudo twinlink recover --pair edge --rollback \
+  --output /root/edge-rollback-01.json --apply --yes
 ```
 
-The CLI matches the mirrored GRE parameters, even when the tunnel has a different local name, and validates conflicts before applying. VPS2 retains VPS1's canonical public bind address. Rathole service names must remain identical on both servers. Import is stopped by default. Start on VPS1, then VPS2, and enable on both when ready for reboot persistence. For rathole, finish by checking both hosts after the client connects:
+Continue its receipts on both hosts. Rollback withdraws target runtime on both
+sides before restoring the saved revision/profile and verifying it. An unreachable
+peer or ownership conflict can leave reachable hosts off pending recovery.
+Preserve the private state and journals until the operation finishes.
+
+For normal deactivation, begin on VPS1:
 
 ```sh
-sudo twinlink forward start web --apply
-sudo twinlink forward check web
-sudo twinlink forward enable web --apply
+sudo twinlink profile switch off --pair edge \
+  --output /root/edge-off-01.json --apply --yes
 ```
 
-Test from a third host against VPS1's public address. Compare the response with the actual target service on VPS2; process status alone does not establish end-to-end success. Remove transfer files when no longer needed and retain secure backups of state if recovery is required.
+Follow every returned shutdown/acknowledgement step. `profile restart` and
+`profile reapply` also coordinate both hosts and use the active revision;
+`profile switch` explicitly activates staged settings.
 
-## Daily operation
+## Diagnostics
 
 ```sh
-sudo twinlink status
-sudo twinlink tunnel list
-sudo twinlink tunnel show edge
-sudo twinlink tunnel diagnose edge
-sudo twinlink forward list
-sudo twinlink forward show web
-sudo twinlink forward diagnose web
-sudo twinlink --json tunnel check edge
-sudo twinlink --json forward check web
+sudo twinlink doctor --pair edge
+sudo twinlink doctor --pair edge --deep
+sudo twinlink doctor --pair edge --watch 5m --interval 1 \
+  --export /root/edge-report.json
 ```
 
-Both `tunnel` and `forward` support `edit`, `enable`, `disable`, `start`, `stop`, `restart`, `reapply`, `check`, `diagnose`, and `delete`. Enablement controls reboot intent; start/stop controls current runtime intent. Disable also stops public exposure. Checks read actual kernel interfaces/addresses, managed rules, sockets, processes and peer probes rather than trusting saved operational flags.
+Doctor observes the active revision and shows staged settings separately.
+It gathers bounded host/route/link/unit/nft evidence and configured application
+exchanges. A selected or restored profile can remain `active-unverified` in
+status; doctor reports evidence-based health separately.
 
-Examples:
+| Verdict | Meaning |
+| --- | --- |
+| `off` | Pair is selected off without a pending transition. |
+| `healthy` | Required local resource and sampled delivery checks passed at this vantage. |
+| `degraded` / `failed` | Observed required checks failed. Read the cited evidence. |
+| `unknown` | Required evidence is missing or unavailable. |
+
+An unavailable nft comment compatibility read leaves ownership unknown when
+other table/rule observations match. Timeouts or truncated evidence alone do
+not justify a drift finding. Explicit marker/rule/GRE mismatches still fail.
+Healthy local probes do not establish independent Internet reachability; test
+from a third machine as well.
+
+Exports are mode 0600 and need a new filename. Default `share` redaction removes
+credentials and pseudonymizes addresses, ports, identities and interfaces while
+preserving within-report relationships. `secrets` removes credentials but retains
+diagnostic identities/ports; keep these reports private. To merge reports from
+both hosts, collect each with `--redaction secrets` and transfer them privately.
+On VPS1:
 
 ```sh
-sudo twinlink forward edit web --destination-port 8081 --apply
-sudo twinlink forward export web --output /root/twinlink-transfer/web-v2.pair
-sudo twinlink forward disable web --apply
-sudo twinlink forward restart web --apply
-sudo twinlink forward reapply web --apply
-sudo twinlink forward delete web --apply
-sudo twinlink tunnel delete edge --no-cascade --apply
-sudo twinlink tunnel delete edge --cascade --apply
+sudo twinlink doctor --pair edge --redaction secrets --export /root/vps1-private.json
 ```
 
-After any edit to shared forwarding settings, transfer a fresh export and import it on the other server. Shared edits increment the revision and stop/disable the edited local forward. After importing, enable/start it on both servers again. Revisions identify stale transfers; the CLI cannot remotely update the peer. Kernel relay ports and rathole tokens must agree. Coordinate edits during a maintenance window because existing connections can be terminated. Disabling/deleting a kernel entry also removes its matching conntrack flows so existing NAT flows cannot keep the old public exposure alive. For shared GRE edits, transfer a fresh tunnel pairing code and use `tunnel pair-import --replace` only after inspecting its preview; replacing a tunnel stops its dependent entries.
-
-Tunnel deletion lists dependencies. When any exist, choose `--no-cascade` to refuse their deletion or `--cascade` to explicitly include them. Deletion removes only owned interfaces, files, rules and units, and reports cleanup failures.
-
-## Drift and recovery
-
-Use `check` for status and `diagnose` for evidence such as peer ping, TCP destination reachability, path MTU commands, generated configuration and systemd logs. Forwarding health distinguishes GRE failure, rathole connection/process failure, missing public listeners or rules, and destination failure. A destination probe can fail because of an intentional backend firewall policy; inspect the specific reason and test the intended traffic from a third host.
+On VPS2:
 
 ```sh
-sudo twinlink tunnel reapply edge --apply
-sudo twinlink forward reapply web --apply
-sudo twinlink recover --apply
+sudo twinlink doctor --pair edge --redaction secrets --export /root/vps2-private.json
 ```
 
-Reapply repairs desired configuration drift. An unfinished transaction blocks subsequent mutation; `recover` uses its private journal to restore the prior state. If rollback has partial failures, inspect the reported command and concrete repair instructions, retain the journal, repair the underlying problem and rerun recovery. Do not delete the journal to hide an incomplete network change.
-
-State and rollback data live in `/var/lib/twinlink` (0700), with `state.json`, transaction journals, generated rules and rathole secrets restricted to 0600. `--state-dir`, `--unit-dir`, `--runtime-path`, and `--rathole-binary` are global options. A state directory represents one managed installation; do not run independent state directories against the same host namespace because the application owns one dedicated `ip twinlink` nftables table.
-
-## Uninstall
-
-Remove the user-facing program while keeping managed networking and reboot persistence:
+Copy both private files to one host, then merge there:
 
 ```sh
-sudo scripts/uninstall.sh
+sudo twinlink doctor --merge /root/vps1-private.json /root/vps2-private.json \
+  --export /root/paired-share.json
 ```
 
-This removes `/usr/local/bin/twinlink`. When managed records or owned units exist it retains the runtime, state, secrets and units, so the units' executable remains available. Reinstall to restore the launcher, or invoke the retained runtime directly. The uninstaller reports everything retained. Dependencies and separately installed rathole binaries are retained.
+The merged output uses share redaction by default. Independently pseudonymized
+share reports cannot establish paired identity. Compare a prior private report
+with `doctor --pair edge --redaction secrets --compare /root/old-private.json`.
 
-Explicitly remove managed tunnels and forwards, then remove the program:
+Quick/deep collection budgets are 15/60 seconds; commands have a three-second,
+64 KiB output budget. Watch supports intervals of at least 250 ms, at most one
+hour, 100,000 samples and a 10 MiB final report. Sampling gaps/truncation remain
+visible; unsampled probes are unknown. ICMP success alone is not delivery proof.
+
+## Reboot and upgrade
+
+Preparation installs an owned, enabled restore coordinator. On boot it restores
+only committed selections. Off stays off; interrupted cutovers boot off pending
+recovery. Each pair is handled independently so one failure does not prevent
+unrelated pairs from being attempted. Restored traffic still needs delivery
+verification; actual systemd/reboot acceptance remains unrun.
+
+Install an updated checkout with the same installer and paths. Installation does
+not automatically convert an older deployment's state. The explicit
+`config migrate` preview inventories an offline deployment; ambiguous groupings,
+credential changes and incomplete provenance require operator review. This is
+not part of the new-pair walkthrough. Preserve private backups and recovery
+access before changing an existing deployment.
+
+## Removal
+
+Complete coordinated off for every affected pair first. Deletion is local:
+repeat it on each host after both sides finish shutdown.
 
 ```sh
-sudo scripts/uninstall.sh --purge-managed --cascade
-# Unattended, after reviewing the intended removal:
-sudo scripts/uninstall.sh --purge-managed --cascade --yes
+sudo twinlink pair delete --pair edge
+sudo twinlink pair delete --pair edge --apply --yes
+sudo twinlink system changes
 ```
 
-The purge runs the normal preview/apply/verify transaction and requires the cascade choice. Program files remain if resource removal fails. State/backups remain for review. Installation manifests prevent overwriting or removing foreign or modified program files.
+Pair deletion removes unchanged owned resources, configs, credentials and history,
+while preserving other pairs and foreign changes. An interrupted deletion can
+resume with the same command. Ownership conflicts require inspection rather
+than force deletion. Shared settings are restored after their last owner is
+released and only when observations match the recorded baseline/applied values.
 
-## Verification
-
-Run unit tests without root:
+For a full local uninstall instead of individual pair deletion:
 
 ```sh
-python3 -m unittest discover -s tests -v
+sudo twinlink uninstall --plan
+sudo twinlink uninstall --purge --apply --yes
 ```
 
-Validation and pairing unit tests cover private subnet/endpoint conflicts, SSH and wildcard/public/relay port conflicts including disabled reservations, malformed and oversized pairing codes, exact peer swapping, strong tokens, revision updates and stale imports. Other test modules exercise rendered plans, ownership and rollback using a fake host. These are not substitutes for real packet delivery tests.
+Run it separately on each host after every pair completes coordinated off.
+Removal verifies installation hashes, restores eligible owned settings and
+checks recorded dependency changes before removing program/recovery files last.
+Unknown package provenance, foreign dependents or edited files produce conflicts
+and preserve recovery access. Retry interrupted cleanup after inspecting its
+journal; do not erase it manually.
 
-Linux network namespace integration tests require root, GRE support, nftables, conntrack, iproute2 and ICMP tools. Rathole coverage additionally requires a trusted rathole executable:
-
-```sh
-sudo -E env TWINLINK_INTEGRATION=1 \
-  TWINLINK_RATHOLE_BINARY=/opt/rathole/rathole \
-  python3 -m unittest discover -s tests/integration -v
-```
-
-Inspect skip messages if a dependency or selected executable is unavailable. The test-only `--no-systemd` global option requires `TWINLINK_TESTING=1`; it must not be used for production reboot management.
-
-The development environment is macOS, so Linux namespace packet delivery, systemd restart and real reboot checks cannot be claimed from tests run here. Before production use, run the Linux suite and check both real VPSs after a reboot: peer reachability, each forwarding mode from an external host, edit/re-pair, disable/delete port closure, drift/reapply, failure rollback, and service restart recovery. Provider GRE filtering and underlay MTU require real environment validation. See [architecture](architecture.md) for ownership and recovery boundaries.
+`sudo scripts/uninstall.sh` is program-only removal: it can retain runtime and
+services needed by managed records. Use the v2 `uninstall --purge` flow above for
+full local cleanup. Separately installed Rathole binaries and exported files
+outside TwinLink storage remain operator-owned. Local cleanup never claims that
+the peer is clean.
