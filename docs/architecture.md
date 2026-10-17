@@ -1,5 +1,26 @@
 # Architecture and operating boundaries
 
+## Schema v2 development architecture
+
+`contracts.py` validates immutable, host-independent pair revisions. `profiles.py`
+and `paqet.py` render all four adapters from one service list and transport port.
+`Store.stage` writes private immutable revisions and role artifacts before
+committing the staged pointer, preserving the active revision. `pair_bundle.py`
+implements bounded p2 framing, fingerprint bootstrap, and established-key HMAC.
+`coordination.py` journals role/epoch/transaction-bound barriers and receipt
+history; `profile_runtime.py` mutates only local resources. Rollback uses the same
+both-host barriers rather than v1 snapshot restoration. `ownership.py` records
+conditional restoration proof; `cleanup.py` performs off-only pair/system/program
+cleanup. `migration.py` inventories explicit offline v1 migration.
+
+`diagnostics.py`, `reports.py`, and `redaction.py` provide bounded local evidence,
+private report export, conservative verdicts, metadata capture, and epoch-aware
+comparison. See [current release boundaries](../v2-operations.md#diagnostics-and-remaining-work)
+for unfinished diagnostic analysis, credential rotation, and deployment
+qualification. V2 intentionally cannot activate unqualified Paqet protocols.
+
+## Retained v1 architecture
+
 The CLI treats a GRE tunnel and its forwarding entries as separate resources. Each server stores a local version-1 JSON state with `tunnels` and `forwards` keyed by stable names. Desired runtime flags are distinct from live observations. Monitoring always reads the kernel or service manager and performs reachability probes.
 
 The menu presents two main tasks: GRE tunnels and Port forwarding, with maintenance under System tools. `forward setup` is the common guided entry point for Kernel and Rathole. It reuses saved GRE configuration; VPS1 chooses the forwarding method and VPS2 detects it from pairing text. Rathole installation, shared config creation, consolidation and config paths are public `forward` commands. The older `rathole` group reuses the same implementation for compatibility. Both methods use the existing forwarding state and transaction engine.

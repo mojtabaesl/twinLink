@@ -2,6 +2,12 @@
 
 [README](../README.md) · [Command reference](commands.md)
 
+New schema-v2 deployments use the [v2 operations guide](../v2-operations.md).
+It documents one shared configuration, four profile manifests, authenticated
+bundles/phase receipts, off-only deletion, Paqet prerequisites, and release
+limitations. The v1 procedures below remain available until explicit offline
+`config migrate`; they cannot mutate a committed v2 installation.
+
 twinLink is a Python standard-library CLI for an IPv4 GRE link between two Linux VPSs, with independent kernel or rathole forwarding entries on that link. Both servers keep their own configuration. There is an interactive menu and scriptable commands; no web panel or SOCKS proxy is included.
 
 GRE connectivity must be checked successfully before adding forwarding. A locally UP interface alone does not satisfy that requirement. Kernel mode supports TCP/UDP and ranges of up to 256 ports. Rathole mode supports single-port TCP services; UDP is deliberately rejected until a selected rathole version has passed end-to-end verification.

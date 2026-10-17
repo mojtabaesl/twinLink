@@ -38,6 +38,8 @@ def _global_arguments(args):
         value = getattr(args, field, None)
         if value is not None:
             result.extend(("--" + field.replace("_", "-"), str(value)))
+    if getattr(args, "paqet_binary", "/usr/local/bin/paqet") != "/usr/local/bin/paqet":
+        result += ["--paqet-binary", args.paqet_binary]
     if getattr(args, "json", False):
         result.append("--json")
     if getattr(args, "verbose", False):
@@ -525,4 +527,116 @@ def run_forward_menu(args, command_runner=None, input_fn=None, output_fn=None):
         return menu.forwards() or 0
     except (EOFError, KeyboardInterrupt, _Cancelled):
         menu.write("\nMenu closed.")
+        return 0
+
+
+def run_v2_menu(args, command_runner=None, input_fn=None, output_fn=None):
+    """V2 navigation uses the same preview-first CLI as scripted operations."""
+    from .cli import main
+    runner = command_runner or main
+    menu = _Menu(args, runner, input_fn or input, output_fn or print)
+    try:
+        while True:
+            choice = menu.choice("Main menu", (("1", "Pairing"), ("2", "Services"), ("3", "Profiles"),
+                ("4", "Status/Doctor"), ("5", "System/Cleanup"), ("0", "Exit")))
+            if choice == "0":
+                return 0
+            state = Store(args.state_dir).read()
+            pair = next(iter(state.get("pairs", {}))) if len(state.get("pairs", {})) == 1 else None
+            def pair_flags():
+                return ["--pair", pair or menu.prompt("Pair ID", required=True)]
+            if choice == "1":
+                action = menu.choice("Pairing", (("1", "Set up a pair"), ("2", "Import private bundle"),
+                    ("3", "Export private bundle"), ("4", "Status"), ("5", "Edit shared transport port"), ("0", "Back")))
+                if action == "1":
+                    _v2_pair_setup(menu)
+                elif action == "2":
+                    command = ["pair", "import", *pair_flags(), "--file", menu.prompt("Private bundle file", required=True)]
+                    expected = menu.prompt("Trusted SHA256 fingerprint (required for first import)")
+                    if expected:
+                        command += ["--expected-fingerprint", expected]
+                    menu.execute(command, mutation=True)
+                elif action == "3":
+                    menu.execute(["pair", "export", *pair_flags(), "--output", menu.prompt("New private export file", required=True)], private_export=True)
+                elif action == "4":
+                    menu.execute(["pair", "status", *pair_flags()])
+                elif action == "5":
+                    menu.execute(["config", "set", "transport.port", menu.prompt("Shared transport port", required=True), *pair_flags()], mutation=True)
+            elif choice == "2":
+                action = menu.choice("Services", (("1", "List"), ("2", "Add"), ("3", "Edit"), ("4", "Delete"), ("0", "Back")))
+                if action == "0":
+                    continue
+                name = {"1": "list", "2": "add", "3": "edit", "4": "delete"}[action]
+                command = ["service", name, *pair_flags()]
+                if name != "list":
+                    command += [menu.prompt("Service ID", required=True)]
+                if name in ("add", "edit"):
+                    for flag, label, default in (("--bind", "VPS1 service bind", "0.0.0.0"),
+                            ("--protocol", "Protocol", "tcp"), ("--ports", "Public port/range", None),
+                            ("--backend-address", "Backend IPv4", "127.0.0.1"), ("--backend-ports", "Backend port/range", None),
+                            ("--probe-request-hex", "Safe application request hex (optional)", None),
+                            ("--probe-response-hex", "Expected response hex (optional)", None)):
+                        value = menu.prompt(label, default=default if name == "add" else None,
+                                            required=name == "add" and "probe" not in flag)
+                        if value:
+                            command += [flag, value]
+                menu.execute(command, mutation=name != "list")
+            elif choice == "3":
+                action = menu.choice("Profiles", (("1", "List"), ("2", "Check local preparation"),
+                    ("3", "Switch / off / resume"), ("4", "Regenerate local preparation"), ("0", "Back")))
+                if action == "0":
+                    continue
+                flags = pair_flags()
+                if action == "1":
+                    menu.execute(["profile", "list", *flags])
+                elif action == "4":
+                    menu.execute(["config", "regenerate", *flags], mutation=True)
+                else:
+                    from .contracts import PROFILES
+                    choices = [(str(i), p) for i, p in enumerate((*PROFILES, "off"), 1)]
+                    selected = menu.choice("Target profile", choices)
+                    profile = dict(choices)[selected]
+                    command = ["profile", "check" if action == "2" else "switch", profile, *flags]
+                    if action == "3":
+                        incoming = menu.prompt("Incoming receipt file (empty for first VPS1 step)")
+                        if incoming:
+                            command += ["--receipt-file", incoming]
+                        command += ["--output", menu.prompt("New outgoing receipt file", required=True)]
+                    menu.execute(command, mutation=action == "3")
+            elif choice == "4":
+                action = menu.choice("Status/Doctor", (("1", "Status"), ("2", "Quick doctor"), ("3", "Deep doctor"), ("0", "Back")))
+                if action != "0":
+                    menu.execute(["status"] if action == "1" else ["doctor", *pair_flags(), *(["--deep"] if action == "3" else [])])
+            elif choice == "5":
+                action = menu.choice("System/Cleanup", (("1", "System changes"), ("2", "Restore settings after off"),
+                    ("3", "Delete pair after off"), ("4", "Recovery status"), ("5", "Full local uninstall after off"), ("0", "Back")))
+                if action == "1":
+                    menu.execute(["system", "changes"])
+                elif action == "2":
+                    menu.execute(["system", "restore"], mutation=True)
+                elif action == "3":
+                    menu.execute(["pair", "delete", *pair_flags()], mutation=True)
+                elif action == "4":
+                    menu.execute(["recover", *pair_flags()])
+                elif action == "5":
+                    menu.execute(["uninstall", "--purge"], mutation=True)
+    except (EOFError, KeyboardInterrupt, _Cancelled):
+        menu.write("Menu closed.")
+        return 0
+
+
+def _v2_pair_setup(menu):
+    command = ["setup", "--pair", menu.prompt("Pair ID", required=True),
+               "--vps1", menu.prompt("VPS1 public IPv4", required=True),
+               "--vps2", menu.prompt("VPS2 public IPv4", required=True),
+               "--transport-port", menu.prompt("Shared transport port", default="3456", required=True)]
+    return menu.execute(command, mutation=True)
+
+
+def run_pair_setup(args):
+    from .cli import main
+    menu = _Menu(args, main, input, print)
+    try:
+        return _v2_pair_setup(menu) or 0
+    except (EOFError, KeyboardInterrupt, _Cancelled):
         return 0

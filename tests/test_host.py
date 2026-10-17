@@ -141,6 +141,15 @@ class CommandTests(unittest.TestCase):
         with self.assertRaises(HostError):
             Host().unit_status("--root=/tmp/evil.service")
 
+    def test_systemd_timer_status_uses_the_same_bounded_unit_validation(self):
+        host = Host()
+        with patch.object(host, "run", return_value={"returncode": 0, "stdout": "LoadState=loaded\nActiveState=active\nUnitFileState=static", "stderr": ""}) as run:
+            self.assertTrue(host.unit_status("twinlink-verification.timer")["active"])
+            self.assertIn("twinlink-verification.timer", run.call_args.args[0])
+        for invalid in ("--root=/tmp/evil.timer", "../foreign.timer", "foreign.socket"):
+            with self.subTest(invalid=invalid), self.assertRaises(HostError):
+                host.unit_status(invalid)
+
 
 class ParsingTests(unittest.TestCase):
     def test_ss_ipv4_ipv6_and_established_formats(self):

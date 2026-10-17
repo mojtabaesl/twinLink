@@ -21,7 +21,7 @@ class ApplyError(RuntimeError):
 
 def redacted(value):
     if isinstance(value, dict):
-        return {k: ("<redacted>" if k in {"token", "password", "secret", "noise_private_key", "local_private_key"} else redacted(v)) for k, v in value.items()}
+        return {k: ("<redacted>" if k in {"token", "password", "secret", "noise_private_key", "local_private_key", "credentials", "management", "noise_private"} else redacted(v)) for k, v in value.items()}
     if isinstance(value, list):
         return [redacted(v) for v in value]
     if isinstance(value, str):

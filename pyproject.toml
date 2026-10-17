@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "twinlink-cli"
-version = "1.0.0"
-description = "Transactional GRE and forwarding management for Linux"
+version = "2.0.0a1"
+description = "Revisioned two-host transport profiles and forwarding management for Linux"
 requires-python = ">=3.9"
 dependencies = []
 

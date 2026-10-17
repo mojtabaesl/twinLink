@@ -346,6 +346,77 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
     def test_rathole_noise_external_request_edit_disable_restart_delete_and_restore(self):
         self._rathole_lifecycle(noise=True)
 
+    def test_v2_direct_rathole_delivers_with_gre_down(self):
+        binary = os.environ.get("TWINLINK_RATHOLE_BINARY") or shutil.which("rathole")
+        if not binary or not Path(binary).is_file():
+            self.skipTest("set TWINLINK_RATHOLE_BINARY to the pinned executable")
+        from twinlink.contracts import new_revision
+        from twinlink.pair_bundle import credentials
+        from twinlink.profiles import render_rathole
+        from twinlink.rathole import check_version, generate_keypair
+        from twinlink.store import atomic_write
+        check_version(binary)
+        noise = generate_keypair(binary)
+        r = new_revision("direct", {"vps1": "198.18.0.1", "vps2": "198.18.0.2"}, 3456,
+            [{"id": "web", "bind": "198.18.0.1", "protocol": "tcp", "ports": "18080",
+              "backend": {"address": "10.81.0.2", "ports": "28080"}, "probe": None}])
+        r["public_keys"]["noise"] = noise["noise_public_key"]
+        creds = credentials(noise)
+        self._echo()
+        processes = []
+        for role in self.hosts:
+            self._ns(role, ["ip", "link", "set", self.stores[role].read()["tunnels"]["edge"]["interface"], "down"])
+            path = self.directory / (role + "-direct.toml")
+            atomic_write(path, render_rathole(r, role, "direct-rathole", creds))
+            processes.append(self._start_process(role, [binary, str(path)])[0])
+        self._assert_reaches()
+        for process in processes:
+            self._stop(process)
+        self._assert_closed()
+        self._assert_foreign_unchanged()
+
+    def test_v2_paqet_candidate_tcp_and_udp_packet_qualification(self):
+        """Candidate evidence only; qualification is reviewed before enabling it."""
+        import hashlib
+        from twinlink import paqet
+        from twinlink.contracts import new_revision
+        from twinlink.pair_bundle import credentials
+        from twinlink.profiles import table_name
+        from twinlink.store import atomic_write
+        binary = os.environ.get("TWINLINK_PAQET_BINARY")
+        expected = os.environ.get("TWINLINK_PAQET_SHA256")
+        if not binary or not expected:
+            self.skipTest("Paqet candidate requires TWINLINK_PAQET_BINARY and independently trusted TWINLINK_PAQET_SHA256")
+        self.assertEqual(hashlib.sha256(Path(binary).read_bytes()).hexdigest(), expected)
+        version = subprocess.run([binary, "version"], text=True, capture_output=True, timeout=3, check=True)
+        self.assertIn(paqet.VERSION, version.stdout + version.stderr)
+        for protocol in ("tcp", "udp"):
+            with self.subTest(protocol=protocol):
+                self._echo(protocol=protocol)
+                r = new_revision("candidate", {"vps1": "198.18.0.1", "vps2": "198.18.0.2"}, 3456,
+                    [{"id": "echo", "bind": "198.18.0.1", "protocol": protocol, "ports": "18080",
+                      "backend": {"address": "10.81.0.2", "ports": "28080"}, "probe": None}])
+                creds = credentials()
+                processes = []
+                for role in ("vps2", "vps1"):
+                    peer = "vps1" if role == "vps2" else "vps2"
+                    link = json.loads(self._ns(peer, ["ip", "-j", "link", "show", "wan"]).stdout)[0]
+                    facts = {"interface": "wan", "source": r["public_endpoints"][role], "gateway": r["public_endpoints"][peer],
+                             "router_mac": link["address"], "ephemeral_range": [32768, 60999]}
+                    if role == "vps2":
+                        rules = paqet.packet_exceptions(r, facts, table_name("candidate"), "00000000-0000-0000-0000-000000000001")
+                        self._ns(role, ["nft", "--check", "--file", "-"], input=rules)
+                        self._ns(role, ["nft", "--file", "-"], input=rules)
+                    path = self.directory / (role + "-candidate.yaml")
+                    atomic_write(path, paqet.render_config(r, role, facts, creds["paqet"]))
+                    processes.append(self._start_process(role, [binary, "run", "-c", str(path)])[0])
+                self._assert_reaches(protocol=protocol)
+                for process in processes:
+                    self._stop(process)
+                self._assert_closed(protocol=protocol)
+                self._ns("vps2", ["nft", "delete", "table", "ip", table_name("candidate")])
+        self._assert_foreign_unchanged()
+
     def test_rathole_shared_noise_config_two_ports_and_independent_stop(self):
         binary = os.environ.get("TWINLINK_RATHOLE_BINARY") or shutil.which("rathole")
         if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):

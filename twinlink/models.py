@@ -334,6 +334,9 @@ def validate_forward(entry, state, existing_name=None, listeners=(), protected_p
 
 def validate_state(state):
     """Return a fully normalized state, or fail closed on malformed storage."""
+    if isinstance(state, dict) and type(state.get("version")) is int and state["version"] == 2:
+        from .contracts import validate_v2_state
+        return validate_v2_state(state)
     if not isinstance(state, dict) or type(state.get("version")) is not int or state.get("version") != 1:
         raise ValidationError("unsupported or missing state version (expected 1)")
     if not isinstance(state.get("tunnels"), dict) or not isinstance(state.get("forwards"), dict):

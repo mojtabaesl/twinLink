@@ -111,6 +111,18 @@ class PackagingTests(unittest.TestCase):
                     packaging.uninstall(args)
         self.assertTrue(all(path.exists() for path in (launcher, runtime, manifest)))
 
+    def test_baseline_precedes_program_directories_and_is_preserved(self):
+        prefix = self.root / "prefix"
+        args = argparse.Namespace(state_dir=str(self.root / "state"))
+        with mock.patch.object(packaging, "installed_packages", return_value={"python3": "existing"}):
+            baseline = packaging.installer_baseline(args, prefix, None)
+        self.assertFalse((prefix / "bin").exists())
+        self.assertEqual(baseline["packages_before"], {"python3": "existing"})
+        self.assertFalse(baseline["directories"][args.state_dir]["existed"])
+        with mock.patch.object(packaging, "installed_packages", side_effect=AssertionError("must not recapture")):
+            self.assertEqual(packaging.installer_baseline(args, prefix, None), baseline)
+        self.assertEqual((Path(args.state_dir) / "baseline.json").stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

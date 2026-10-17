@@ -122,6 +122,25 @@ def _nft_signature(expressions: list[dict[str, Any]]) -> str:
                 normalized["set"] = sorted(normalized["set"], key=lambda item: json.dumps(item, sort_keys=True))
             if "match" in normalized:
                 match = normalized["match"]
+                flags = {"payload": {"protocol": "tcp", "field": "flags"}}
+                bits = {"fin": 1, "syn": 2, "rst": 4, "psh": 8, "ack": 16, "urg": 32, "ecn": 64, "cwr": 128}
+                def flag_value(value):
+                    if isinstance(value, str) and value in bits:
+                        return bits[value]
+                    if isinstance(value, list) and all(isinstance(v, str) and v in bits for v in value):
+                        result = 0
+                        for v in value:
+                            result |= bits[v]
+                        return result
+                    return value
+                left = match.get("left")
+                if isinstance(left, dict) and set(left) == {"&"} and isinstance(left["&"], list) and len(left["&"]) == 2 and left["&"][0] == flags:
+                    left["&"][1] = flag_value(left["&"][1])
+                    match["right"] = flag_value(match.get("right"))
+                    if left["&"][1] == 4 and match.get("op") == "!=" and match["right"] == 0:
+                        match["op"], match["right"] = "==", 4
+                elif left == flags and match.get("op") == "in" and flag_value(match.get("right")) == 4:
+                    match.update(left={"&": [flags, 4]}, op="==", right=4)
                 # nft 1.0.2 renders comma-separated ct states as an array,
                 # while explicit state sets use {"set": [...]}. Both test
                 # membership; array ordering does not change the match.
@@ -170,10 +189,13 @@ def _rendered_rule_expressions(line: str) -> tuple[str, list[dict[str, Any]]]:
         elif word == "ip" and tokens[index + 1] in ("saddr", "daddr"):
             left, op, right = {"payload": {"protocol": "ip", "field": tokens[index + 1]}}, "==", tokens[index + 2]
             advance = 3
-        elif word in ("tcp", "udp") and tokens[index + 1] == "dport":
-            left = {"payload": {"protocol": word, "field": "dport"}}
+        elif word in ("tcp", "udp") and tokens[index + 1] in ("dport", "sport"):
+            left = {"payload": {"protocol": word, "field": tokens[index + 1]}}
             parts = [int(port) for port in tokens[index + 2].split("-")]
             right, op, advance = (parts[0] if len(parts) == 1 else {"range": parts}), "==", 3
+        elif word == "tcp" and tokens[index + 1:index + 6] == ["flags", "&", "rst", "==", "rst"]:
+            left = {"&": [{"payload": {"protocol": "tcp", "field": "flags"}}, "rst"]}
+            right, op, advance = "rst", "==", 6
         elif word == "fib" and tokens[index + 1:index + 4] == ["daddr", "type", "local"]:
             left = {"fib": {"result": "type", "flags": ["daddr"]}}
             right, op, advance = "local", "==", 4
@@ -191,7 +213,7 @@ def _rendered_rule_expressions(line: str) -> tuple[str, list[dict[str, Any]]]:
             expressions.append({word: action})
             index += 3
             continue
-        elif word in ("accept", "masquerade"):
+        elif word in ("accept", "masquerade", "notrack", "drop"):
             expressions.append({word: None})
             index += 1
             continue
@@ -200,6 +222,24 @@ def _rendered_rule_expressions(line: str) -> tuple[str, list[dict[str, Any]]]:
         expressions.append({"match": {"op": op, "left": left, "right": right}})
         index += advance
     raise HostError("Generated nft rule has no ownership comment.")
+
+
+def recover_nft_table_comments(snapshot, expected_comments, run):
+    """Recover only an expected leading table marker missing from nft JSON."""
+    for item in snapshot.get("nftables", []):
+        table = item.get("table", {})
+        name = table.get("name")
+        if table.get("family") != "ip" or name not in expected_comments or "comment" in table:
+            continue
+        marker = expected_comments[name]
+        result = run(["nft", "list", "table", "ip", name])
+        # Match only the table's leading comment, never a chain/rule comment.
+        # Missing/unreadable evidence must leave ownership unverified.
+        if result["returncode"] == 0 and not result.get("error") and not result.get("truncated") and re.match(
+                r'\A\s*table ip ' + re.escape(name) + r'\s*\{\s*comment "' + re.escape(marker) + r'"\s*;?(?=\s|\})',
+                result["stdout"] or ""):
+            table["comment"] = marker
+    return snapshot
 
 
 class Host:
@@ -271,8 +311,8 @@ class Host:
         return parse_ss(self.run(["ss", "-H", "-nt", "state", "established"])["stdout"])
 
     def unit_status(self, name: str) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z0-9_.@:-]+\.service", name) or name.startswith("-"):
-            raise HostError("Invalid systemd service name.")
+        if not re.fullmatch(r"[A-Za-z0-9_.@:-]+\.(?:service|timer)", name) or name.startswith("-"):
+            raise HostError("Invalid systemd unit name.")
         result = self.run(["systemctl", "show", name, "--no-pager",
                            "--property=LoadState,ActiveState,SubState,UnitFileState,Result,ExecMainStatus,FragmentPath,MainPID,DropInPaths"],
                           check=False)
@@ -295,20 +335,10 @@ class Host:
                 "systemd_runtime": linux and Path("/run/systemd/system").is_dir(),
                 "gre_module_loaded": linux and Path("/sys/module/ip_gre").is_dir()}
 
-    def nft_table_comments(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def nft_table_comments(self, snapshot: dict[str, Any], expected_comments=None) -> dict[str, Any]:
         """Recover the table marker omitted by older nft JSON serializers."""
-        for item in snapshot.get("nftables", []):
-            table = item.get("table", {})
-            if (table.get("family"), table.get("name")) != ("ip", "twinlink") or "comment" in table:
-                continue
-            result = self.run(["nft", "list", "table", "ip", "twinlink"], check=False)
-            # Match only the table's leading comment, never a chain/rule comment.
-            # Missing/unreadable evidence must leave ownership unverified.
-            if not result["returncode"] and re.match(
-                    r'\A\s*table ip twinlink\s*\{\s*comment "twinlink-owned"\s*;?(?=\s|\})',
-                    result["stdout"] or ""):
-                table["comment"] = "twinlink-owned"
-        return snapshot
+        expected_comments = {"twinlink": "twinlink-owned"} if expected_comments is None else expected_comments
+        return recover_nft_table_comments(snapshot, expected_comments, lambda argv: self.run(argv, check=False))
 
     def nft_snapshot(self) -> dict[str, Any]:
         result = self.run(["nft", "-j", "list", "ruleset"], check=False)

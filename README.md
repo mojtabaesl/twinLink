@@ -2,6 +2,31 @@
 
 # TwinLink
 
+## V2 development release
+
+New installations can configure one pair and its services once, then manually
+select `gre-kernel`, `gre-rathole`, `direct-rathole`, or off. `direct-paqet`
+configuration generation is included but activation is gated pending trusted
+binary hashes and separate TCP/UDP packet qualification. This alpha has not
+been qualified on Linux/systemd VMs or real VPSs. See [v2 operations and current
+limits](v2-operations.md) and the [verification record](docs/verification.md).
+
+```sh
+sudo twinlink setup --pair edge --vps1 VPS1_IPV4 --vps2 VPS2_IPV4 --transport-port 3456
+# Review, then repeat with --apply --yes. Runtime stays off.
+sudo twinlink service add web --pair edge --ports 8081 --backend-address 10.20.30.40 --backend-ports 80
+sudo twinlink config regenerate --pair edge
+sudo twinlink pair export --pair edge --output /root/edge.p2
+```
+
+The shared port belongs to the pair. Editing `transport.port` stages a new
+immutable revision for all transports; the active revision remains selected
+until receipt-coordinated activation. Exports explicitly disclose credentials;
+setup never prints them. Existing v1 state is never migrated on read or upgrade.
+
+The sections below describe the retained **legacy v1** commands. After explicit
+v2 setup/migration, use `pair`, `service`, `profile`, and `config` instead.
+
 TwinLink connects two Linux VPSs through an IPv4 GRE tunnel and forwards public traffic from **VPS1** to services reachable from **VPS2**. Manage tunnels and forwarding with an interactive menu or a scriptable CLI.
 
 ```text

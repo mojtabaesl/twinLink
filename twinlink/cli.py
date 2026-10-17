@@ -38,8 +38,11 @@ def build_parser():
     parser.add_argument("--unit-dir", default="/etc/systemd/system", help="Managed unit directory")
     parser.add_argument("--runtime-path", default="/usr/local/libexec/twinlink-runtime", help="Absolute installed runtime used by units")
     parser.add_argument("--rathole-binary", default="/usr/local/bin/rathole", help="Rathole 0.5.0 executable/install path")
+    parser.add_argument("--paqet-binary", default="/usr/local/bin/paqet", help="Pinned prepared Paqet executable path")
     parser.add_argument("--no-systemd", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="group", required=True)
+    from .v2_cli import register
+    register(commands, mutation_flags)
     for group in ("tunnel", "forward"):
         group_parser = commands.add_parser(group, help="1. Create and manage GRE tunnels" if group == "tunnel" else "2. Set up and manage port forwarding (Kernel or Rathole)")
         actions = group_parser.add_subparsers(dest="action", required=True)
@@ -166,15 +169,44 @@ def build_parser():
     for name in ("doctor", "status", "menu"):
         leaf = commands.add_parser(name)
         leaf.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        if name in ("doctor", "status"):
+            leaf.add_argument("--pair")
+        if name == "doctor":
+            leaf.add_argument("--deep", action="store_true")
+            leaf.add_argument("--watch")
+            leaf.add_argument("--interval", type=float, default=1)
+            leaf.add_argument("--capture", action="store_true")
+            leaf.add_argument("--capture-interface")
+            leaf.add_argument("--capture-peer")
+            leaf.add_argument("--capture-port", type=int)
+            leaf.add_argument("--capture-direction", choices=("in", "out", "inout"), default="inout")
+            leaf.add_argument("--preview", action="store_true")
+            leaf.add_argument("--redaction", choices=("share", "secrets"), default="share")
+            leaf.add_argument("--export")
+            leaf.add_argument("--merge", nargs=2)
+            leaf.add_argument("--compare")
     recover = commands.add_parser("recover", help="Roll back an interrupted journalled transaction")
+    recover.add_argument("--pair")
+    recover.add_argument("--rollback", action="store_true", help="Coordinate v2 rollback through both-host quiescence")
+    recover.add_argument("--cancel-preflight", action="store_true")
+    recover.add_argument("--receipt-file")
+    recover.add_argument("--output")
+    recover.add_argument("--step")
+    recover.add_argument("--transaction")
+    recover.add_argument("--refresh-receipt", action="store_true")
     mutation_flags(recover)
     uninstall = commands.add_parser("uninstall", help="Preview resource removal; program-only removal is scripts/uninstall.sh")
+    uninstall.add_argument("--pair")
+    uninstall.add_argument("--plan", action="store_true")
+    uninstall.add_argument("--purge", action="store_true")
     uninstall.add_argument("--purge-managed", action="store_true", help="Delete every managed tunnel and forwarding entry")
     uninstall.add_argument("--cascade", action="store_true")
     mutation_flags(uninstall)
     internal = commands.add_parser("internal", help="Boot callbacks used by managed units")
-    internal.add_argument("operation", choices=("restore", "tunnel-up", "tunnel-down"))
+    internal.add_argument("operation", choices=("restore", "tunnel-up", "tunnel-down", "profile-guard", "verification-expire"))
     internal.add_argument("name", nargs="?")
+    internal.add_argument("--profile", choices=("gre-kernel", "gre-rathole", "direct-rathole", "direct-paqet"))
+    internal.add_argument("--revision", type=int)
     def add_verbose(current):
         current.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS,
                              help="Detailed redacted output (--json takes precedence)")
@@ -482,6 +514,41 @@ def main(argv=None):
             raise ValidationError("--no-systemd is reserved for isolated integration tests (TWINLINK_TESTING=1)")
         store = Store(args.state_dir)
         host = Host()
+        from . import v2_cli
+        from .coordination import Pending
+        if args.group in v2_cli.GROUPS or args.group == "uninstall" and (store.directory / "uninstall.json").exists():
+            if args.group == "setup" and not any((args.file, args.pair, args.vps1, args.vps2)) and sys.stdin.isatty():
+                from .menu import run_pair_setup
+                return run_pair_setup(args)
+            try:
+                return v2_cli.handle(args, store, host, _confirm)
+            except Pending as exc:
+                v2_cli.emit({"status": "pending", "error": str(exc)}, args)
+                return 3
+            except ValidationError as exc:
+                v2_cli.emit({"status": "invalid", "error": str(exc)}, args)
+                return 2
+            except StateError as exc:
+                v2_cli.emit({"status": "conflict", "error": str(exc)}, args)
+                return 4
+        v2_state = store.read()
+        diagnostic_options = args.group == "doctor" and any(getattr(args, k, None) for k in ("deep", "watch", "export", "merge", "compare", "preview", "capture"))
+        if args.group == "doctor" and (v2_state["version"] == 2 or diagnostic_options):
+            return v2_cli.doctor(args, store)
+        if v2_state["version"] == 2:
+            if args.group == "menu":
+                from .menu import run_v2_menu
+                return run_v2_menu(args)
+            if args.group in ("status", "recover", "uninstall", "internal"):
+                try:
+                    return v2_cli.handle(args, store, host, _confirm)
+                except Pending as exc:
+                    v2_cli.emit({"status": "pending", "error": str(exc)}, args)
+                    return 3
+                except StateError as exc:
+                    v2_cli.emit({"status": "conflict", "error": str(exc)}, args)
+                    return 4
+            raise ValidationError("Legacy commands are disabled after explicit v2 commit; use pair/profile/service/config commands")
         engine = Engine(store, host, unit_dir=args.unit_dir, executable=args.runtime_path,
                         rathole_binary=args.rathole_binary, systemd=not args.no_systemd)
         if args.group == "menu":
@@ -661,6 +728,12 @@ def main(argv=None):
         emit({**result, "plan": plan} if args.json else result, args.json, phase="applied", old=state, candidate=candidate, affected=affected)
         return 0
     except (ValidationError, StateError, HostError, ApplyError, OSError, ValueError) as exc:
+        versioned = args.group in {"setup", "pair", "profile", "service", "config", "system", "logs"} or locals().get("v2_state", {}).get("version") == 2 or locals().get("diagnostic_options", False)
+        if versioned:
+            from .v2_cli import emit as emit_v2
+            code = 2 if isinstance(exc, ValidationError) else 4 if isinstance(exc, StateError) else 1
+            emit_v2({"status": "invalid" if code == 2 else "conflict" if code == 4 else "failed", "error": str(exc)}, args)
+            return code
         details = {"error": str(exc)}
         if getattr(exc, "rollback_errors", None):
             details["rollback_errors"] = exc.rollback_errors

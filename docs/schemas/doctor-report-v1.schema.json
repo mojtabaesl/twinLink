@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://twinlink.invalid/schemas/doctor-report-v1.schema.json",
+  "title": "Twinlink doctor report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_id", "created_at_utc", "collection_window", "collector_version", "versions", "host", "active_profile", "revisions", "config_digest", "service_mappings", "probes", "host_samples", "interface_route_samples", "firewall_conntrack", "processes_systemd", "profile_evidence", "log_events", "inactive_readiness", "overall_status", "findings", "collection_errors", "unknowns", "redaction_summary", "truncation"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_id": {"type": "string"},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "collection_window": {
+      "type": "object", "required": ["start", "end", "monotonic"], "additionalProperties": false,
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"},
+        "monotonic": {"type": "object", "required": ["start", "end"], "properties": {"start": {"type": "number", "minimum": 0}, "end": {"type": "number", "minimum": 0}}}
+      }
+    },
+    "collector_version": {"type": "integer", "minimum": 1},
+    "versions": {"type": "object"},
+    "host": {
+      "type": "object", "required": ["role", "pair_id", "boot_id", "clock"],
+      "properties": {
+        "role": {"enum": [null, "vps1", "vps2"]},
+        "pair_id": {"type": ["string", "null"]},
+        "boot_id": {"type": ["string", "null"]},
+        "clock": {"type": "string"}
+      }
+    },
+    "active_profile": {"type": ["string", "null"], "enum": [null, "gre-kernel", "gre-rathole", "direct-rathole", "direct-paqet"]},
+    "revisions": {"type": "object"},
+    "config_digest": {"type": ["string", "null"]},
+    "service_mappings": {"type": "array", "maxItems": 64, "items": {"type": "object"}},
+    "probes": {"$ref": "#/$defs/evidenceArray"},
+    "host_samples": {"$ref": "#/$defs/evidenceArray"},
+    "interface_route_samples": {"$ref": "#/$defs/evidenceArray"},
+    "firewall_conntrack": {"$ref": "#/$defs/evidenceArray"},
+    "processes_systemd": {"$ref": "#/$defs/evidenceArray"},
+    "profile_evidence": {"$ref": "#/$defs/evidenceArray"},
+    "log_events": {"type": "array", "maxItems": 800, "items": {"type": "object"}},
+    "inactive_readiness": {"type": "array", "items": {"type": "object"}},
+    "overall_status": {"enum": ["off", "healthy", "degraded", "failed", "unknown"]},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "collection_errors": {"type": "array", "items": {"type": "object"}},
+    "unknowns": {"type": "array", "items": {"type": "string"}},
+    "redaction_summary": {
+      "type": "object", "required": ["level", "context"],
+      "properties": {"level": {"enum": ["share", "secrets"]}, "context": {"type": "string"}}
+    },
+    "truncation": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "evidenceArray": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/$defs/evidence"}},
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "role", "observed_at_utc", "monotonic_offset", "source", "probe_definition", "result", "value", "unit", "expected_or_baseline", "error"],
+      "properties": {
+        "id": {"type": "string"}, "role": {"type": ["string", "null"]},
+        "observed_at_utc": {"type": "string", "format": "date-time"}, "monotonic_offset": {"type": "number", "minimum": 0},
+        "source": {"type": "string"}, "probe_definition": {"type": "string"},
+        "result": {"enum": ["pass", "fail", "unknown"]}, "value": {}, "unit": {"type": ["string", "null"]},
+        "expected_or_baseline": {}, "error": {"type": ["string", "null"]}, "scheduling_gap": {"type": "number", "minimum": 0}
+      }
+    },
+    "finding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observation", "inference", "likely_cause", "evidence_ids", "counterevidence_ids", "confidence", "suggested_next_checks"],
+      "properties": {
+        "observation": {"type": "string"}, "inference": {"type": "string"}, "likely_cause": {"type": "string"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "counterevidence_ids": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"enum": ["low", "medium", "high"]}, "suggested_next_checks": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

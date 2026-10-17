@@ -2,6 +2,14 @@
 
 [README](../README.md) · [Operations guide](operations.md)
 
+For schema v2, use the [v2 command workflow](../v2-operations.md): `setup`,
+`pair`, `service`, `profile`, `config`, `system`, `logs`, and coordinated
+`recover`. V2 mutations preview by default and use `--apply --yes`; structured
+outputs include `schema_version`, `action`, and `status`. Exit codes are 0
+complete/pass, 1 operation failure, 2 invalid/incompatible, 3 pending/unknown,
+4 conflict/recovery. Add `--pair ID` when selection is ambiguous. The reference
+below applies to retained **v1 state**; no automatic migration occurs.
+
 Run administrative commands with `sudo`. Examples use tunnel `edge` and forwarding entry `web`. Replace names, addresses, ports, and paths as needed.
 
 ## Applying changes and getting help
