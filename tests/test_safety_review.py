@@ -145,7 +145,7 @@ class RevisionBoundReviewTests(V2Fixture):
             self.assertFalse(self.store.directory.exists())
 
     def test_complete_bundle_overhead_is_checked_before_staging(self):
-        r = self.large_revision(8, 1970)
+        r = self.large_revision(8, 1960)
         self.assertLess(len(canonical(r)), MAX_DECODED)
         with self.assertRaisesRegex(ValidationError, "Pair bundle exceeds"):
             self.store.stage(self.store.read(), r, "vps1", self.creds, FACTS)

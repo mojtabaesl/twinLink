@@ -457,7 +457,8 @@ class LaunchGuardReviewTests(RuntimeFixture):
         atomic_write(binary, "fixture paqet binary", 0o755)
         checksum = hashlib.sha256(binary.read_bytes()).hexdigest()
         self.runtime.binaries["paqet"] = str(binary)
-        with patch.object(paqet, "TRUSTED_BINARY_HASHES", {"fixture": checksum}), patch.object(paqet, "QUALIFIED_PROTOCOLS", frozenset(("tcp",))):
+        # Injected policy exercises launch guards; this is not packet evidence.
+        with patch.object(paqet, "binary_pin", return_value={"sha256": checksum}), patch.object(paqet, "qualification", return_value=[]), patch.object(paqet, "check_installed_version"), patch.object(type(self.runtime), "discover", return_value=self.store.facts("edge", 1)):
             self.prepare()
             self.committed("direct-paqet")
             self.assertEqual(self.guard("direct-paqet")[0], 0)

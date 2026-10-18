@@ -125,9 +125,13 @@ class Redactor:
             result = {self.string(str(k)): self.scrub(v, str(k)) for k, v in value.items()}
             if field == "match" and isinstance(value.get("left"), dict) and "right" in value:
                 left = value["left"]
-                payload, meta = left.get("payload"), left.get("meta")
+                payload, meta, conntrack = left.get("payload"), left.get("meta"), left.get("ct")
                 if self.level == "share" and isinstance(payload, dict) and payload.get("field") in ("sport", "dport"):
                     result["right"] = self.operand(value["right"], "port")
+                elif isinstance(conntrack, dict) and conntrack.get("key") in ("proto-src", "proto-dst"):
+                    result["left"]["ct"]["key"] = conntrack["key"]
+                    if self.level == "share":
+                        result["right"] = self.operand(value["right"], "port")
                 elif isinstance(meta, dict) and meta.get("key") in ("iifname", "oifname"):
                     if self.level == "share":
                         result["right"] = self.operand(value["right"], "ifname")

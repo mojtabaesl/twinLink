@@ -526,7 +526,7 @@ def main(argv=None):
             store.read()
             plan = paqet.install_plan(args.paqet_binary, args.sha256)
             if not args.apply:
-                v2_cli.emit({"status": "preview", **plan}, args)
+                emit({"schema_version": 2, "action": "paqet install", "status": "preview", **plan}, args.json, phase="preview")
                 return 0
             _confirm(args)
             host.require_linux_root()
@@ -536,7 +536,7 @@ def main(argv=None):
                 if store.journal.exists() or (store.directory / "uninstall.json").exists():
                     raise StateError("Finish interrupted recovery/uninstall before installing Paqet")
                 result = paqet.install(args.paqet_binary, store, args.sha256)
-            v2_cli.emit({"status": "complete", **result}, args)
+            emit({"schema_version": 2, "action": "paqet install", "status": "complete", **result}, args.json, phase="applied")
             return 0
         if args.group in v2_cli.GROUPS or args.group == "uninstall" and (store.directory / "uninstall.json").exists():
             if args.group == "setup" and not any((args.file, args.pair, args.vps1, args.vps2)) and sys.stdin.isatty():
@@ -754,7 +754,11 @@ def main(argv=None):
         if versioned:
             from .v2_cli import emit as emit_v2
             code = 2 if isinstance(exc, ValidationError) else 4 if isinstance(exc, StateError) else 1
-            emit_v2({"status": "invalid" if code == 2 else "conflict" if code == 4 else "failed", "error": str(exc)}, args)
+            details = {"status": "invalid" if code == 2 else "conflict" if code == 4 else "failed", "error": str(exc)}
+            if args.group == "paqet":
+                emit({"schema_version": 2, "action": "paqet install", **details}, args.json)
+            else:
+                emit_v2(details, args)
             return code
         details = {"error": str(exc)}
         if getattr(exc, "rollback_errors", None):

@@ -104,17 +104,24 @@ def validate_v2_state(value):
     return {**value, "pairs": {_name(k): validate_control(v) for k, v in value["pairs"].items()}}
 
 
-def validate_service(value):
+def validate_service(value, schema_version=None):
     fields(value, ("id", "bind", "protocol", "ports", "backend", "probe"))
-    fields(value["backend"], ("address", "ports"))
+    backend = value["backend"]
+    if schema_version == 2 or schema_version is None and isinstance(backend, dict) and "target" not in backend:
+        fields(backend, ("address", "ports"))
+    else:
+        if not isinstance(backend, dict) or backend.get("target") not in ("address", "vps2-local"):
+            raise ValidationError("Backend target must be address or vps2-local (pair schema 3)")
+        fields(backend, ("target", "ports", "address") if backend["target"] == "address" else ("target", "ports"))
     out = copy.deepcopy(value)
     out["id"] = _name(value["id"])
     out["bind"] = _ipv4(value["bind"], "service bind", wildcard=True)
     if value["protocol"] not in ("tcp", "udp"):
         raise ValidationError("Service protocol must be tcp or udp")
     out["ports"] = _port_string(value["ports"])
-    out["backend"] = {"address": _ipv4(value["backend"]["address"], "backend", loopback=True),
-                      "ports": _port_string(value["backend"]["ports"])}
+    out["backend"] = {**backend, "ports": _port_string(backend["ports"])}
+    if "address" in backend:
+        out["backend"]["address"] = _ipv4(backend["address"], "backend", loopback=True)
     a, b = ports(out["ports"])
     c, d = ports(out["backend"]["ports"])
     if b - a >= 256 or (c != d and b - a != d - c):
@@ -142,8 +149,8 @@ def validate_revision(value):
     fields(value, ("schema_version", "pair_id", "revision", "parent_digest", "public_endpoints",
                    "transport", "gre", "services", "profiles", "credential_ids", "public_keys", "pins"),
            ("legacy_group_assignments",))
-    if type(value["schema_version"]) is not int or value["schema_version"] != 2:
-        raise ValidationError("Expected pair schema v2")
+    if type(value["schema_version"]) is not int or value["schema_version"] not in (2, 3):
+        raise ValidationError("Unsupported pair revision schema; both peers must support schema 3 for tagged backends")
     out = copy.deepcopy(value)
     out["pair_id"] = _name(value["pair_id"])
     out["revision"] = _integer(value["revision"], "revision", 1, 2147483647)
@@ -171,7 +178,7 @@ def validate_revision(value):
                   "ttl": _integer(gre["ttl"], "GRE TTL", 1, 255)}
     if not isinstance(value["services"], list) or len(value["services"]) > 64:
         raise ValidationError("At most 64 services are supported")
-    out["services"] = [validate_service(s) for s in value["services"]]
+    out["services"] = [validate_service(s, value["schema_version"]) for s in value["services"]]
     if sum(ports(s["ports"])[1] - ports(s["ports"])[0] + 1 for s in out["services"]) > 256:
         raise ValidationError("A pair may expand to at most 256 service ports")
     if len({s["id"] for s in out["services"]}) != len(out["services"]):
@@ -238,18 +245,22 @@ def validate_revision(value):
 
 
 def new_revision(pair_id, endpoints, transport_port=3456, services=(), gre=None):
-    return validate_revision({"schema_version": 2, "pair_id": pair_id, "revision": 1,
+    from .backends import promote
+    return validate_revision({"schema_version": 3, "pair_id": pair_id, "revision": 1,
         "parent_digest": None, "public_endpoints": endpoints, "transport": {"port": transport_port},
         "gre": gre or {"addresses": {"vps1": "10.77.0.1/30", "vps2": "10.77.0.2/30"},
                        "key": None, "mtu": 1476, "ttl": 64},
-        "services": list(services), "profiles": default_profiles(pair_id),
+        "services": [promote(s) for s in services], "profiles": default_profiles(pair_id),
         "credential_ids": {k: hashlib.sha256((pair_id + ":" + k).encode()).hexdigest()[:32] for k in ("management", "rathole", "paqet", "noise")},
         "public_keys": {"noise": None}, "pins": copy.deepcopy(PINS)})
 
 
 def next_revision(previous, **changes):
-    return validate_revision({**copy.deepcopy(previous), **changes,
-        "revision": previous["revision"] + 1, "parent_digest": digest(previous)})
+    from .backends import promote
+    out = {**copy.deepcopy(previous), **changes, "schema_version": 3,
+           "revision": previous["revision"] + 1, "parent_digest": digest(previous)}
+    out["services"] = [promote(s) for s in out["services"]]
+    return validate_revision(out)
 
 
 def validate_reservations(revision, others):

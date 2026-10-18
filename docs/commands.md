@@ -71,6 +71,7 @@ Paqet has a separate installer, available before or after pair setup:
 ```sh
 sudo twinlink paqet install
 sudo twinlink paqet install --apply --yes
+sudo twinlink paqet install --apply --yes --verbose
 sudo twinlink --paqet-binary /opt/paqet/paqet paqet install --apply --yes
 ```
 
@@ -79,6 +80,10 @@ alpha.21 Linux x86_64/ARM64 release, verifies built-in archive and binary hashes
 and never replaces a different executable. Optional `--sha256 HASH` must match
 the built-in archive pin; it cannot override it. Installation records ownership
 for conditional cleanup but does not qualify or activate the Paqet profile.
+
+Paqet installation prints a short summary by default, like Rathole. Add
+`--verbose` for release, checksum, and installation details, or `--json` for
+the versioned JSON document used by scripts.
 
 | Command | Purpose |
 | --- | --- |
@@ -118,15 +123,26 @@ active one. `service list` and `config show` describe staged settings.
 | `--bind IPV4` | VPS1 bind address; defaults to the pair's VPS1 public address for new services. |
 | `--protocol tcp\|udp` | Defaults to TCP; Rathole profiles accept TCP only. |
 | `--ports PORT_OR_RANGE` | Public port or inclusive range, such as `8081-8082`. |
-| `--backend-address IPV4` | Backend reachable from VPS2. Loopback requires a Rathole profile. |
+| `--backend-address IPV4` | Explicit backend reachable from VPS2. Explicit loopback is incompatible with kernel DNAT. |
+| `--backend-local` | Target VPS2 itself; mutually exclusive with `--backend-address`. Default for add; explicit reset for edit. |
 | `--backend-ports PORT_OR_RANGE` | Equal-width range, or one fixed backend port. |
 | `--probe-request-hex HEX` | Safe application request as hex bytes. |
 | `--probe-response-hex HEX` | Expected application response as hex bytes. |
 
 Specify both probe fields together. Every service needs a safe exchange before
 activation. Unsupported mappings make the whole profile incompatible.
+Omitting both target options on edit preserves the saved intent/address.
+Add previews show the effective target for every profile. VPS2-local resolves
+to its GRE address for kernel delivery and IPv4 loopback for proxy profiles.
+See [backend bindings](operations.md#backend-intent-and-bindings) before switching.
 `config set` accepts `transport.port`, `gre.mtu`, `gre.ttl`, `gre.key`,
-`public_endpoints.vps1` and `public_endpoints.vps2`.
+`gre.addresses`, `gre.addresses.vps1`, `gre.addresses.vps2`,
+`public_endpoints.vps1` and `public_endpoints.vps2`. To change the GRE subnet,
+set both addresses in one revision:
+
+```sh
+sudo twinlink config set gre.addresses '{"vps1":"10.78.0.1/30","vps2":"10.78.0.2/30"}' --pair edge --apply --yes
+```
 
 ## Profile lifecycle and recovery
 

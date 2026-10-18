@@ -7,6 +7,7 @@ The current documentation is organized by task:
 - [Command reference](docs/commands.md): pair/profile commands and options.
 - [Architecture](docs/architecture.md): profiles, revisions and ownership.
 - [Verification and release status](docs/verification.md): tested behavior and remaining acceptance work.
+- [Backend bindings](docs/operations.md#backend-intent-and-bindings) and [Paqet qualification](docs/paqet-qualification.md).
 
 Use the operations guide as the canonical reference. This page retains the
 previous documentation URL without duplicating setup instructions.

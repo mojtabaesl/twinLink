@@ -99,6 +99,9 @@ sudo twinlink paqet install
 sudo twinlink paqet install --apply --yes
 ```
 
+The default output is a short installation summary. Add `--verbose` for
+installation details or `--json` for structured output.
+
 This installs the pinned [alpha.21 Linux release](https://github.com/hanselime/paqet/releases/tag/v1.0.0-alpha.21)
 for x86_64/ARM64 at `/usr/local/bin/paqet`, verifying both archive and executable
 checksums. It reuses an unchanged matching binary and never overwrites a different
@@ -121,22 +124,34 @@ VPS1's configuration in step 5.
 
 ## 3. Add the service on VPS1
 
-This example assumes a TCP backend at `127.0.0.1:9000` on VPS2 that replies
+This example assumes a TCP backend on VPS2 port `9000` that replies
 `PONG\n` to `PING\n`. You can use the [temporary test backend](docs/operations.md#test-backend),
 or replace the address, ports and probe bytes for your own application.
 
 ```sh
 sudo twinlink service add echo --pair edge \
   --protocol tcp --ports 8081 \
-  --backend-address 127.0.0.1 --backend-ports 9000 \
+  --backend-ports 9000 \
   --probe-request-hex 50494e470a --probe-response-hex 504f4e470a \
   --apply --yes
 ```
 
 `8081` is the client-facing port. `9000` is the backend port. `3456` connects the
 VPSs. A safe request/response probe is required before activation; an open port
-alone does not prove delivery. This loopback example is compatible with the
-Rathole profiles, not `gre-kernel`.
+alone does not prove delivery.
+
+Omitting `--backend-address` means **VPS2 itself**. Rathole resolves that to
+`127.0.0.1`; the kernel profile resolves it to VPS2's GRE address. To switch
+between both paths, bind the backend on IPv4 `0.0.0.0:9000` or deliberately
+cover both addresses. Restrict direct access to port 9000 in your existing
+firewall; wildcard binding also listens on public interfaces. The temporary
+loopback-only test backend works with Rathole and must be rebound for kernel
+delivery. TwinLink does not change backend bindings or foreign firewall policy.
+
+Use `--backend-address IPV4` for an explicit destination, or `service edit echo
+--pair edge --backend-local` to reset the target to VPS2 itself. These edits
+require the usual `--apply --yes`. New revisions use schema 3; update both peers
+before exchanging them. Existing schema-2 addresses retain their meaning.
 
 ## 4. Prepare and export on VPS1
 

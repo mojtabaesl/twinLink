@@ -32,3 +32,32 @@ jobs:
       - name: Prove GRE packet paths and lifecycle in Linux namespaces
         run: |
           sudo env PYTHONDONTWRITEBYTECODE=1 TWINLINK_INTEGRATION=1 TWINLINK_RATHOLE_BINARY=/tmp/twinlink-rathole/target/release/rathole PYTHONPATH="$PWD" python3 -m unittest tests.integration.test_netns -v
+  paqet-native-candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install disposable namespace dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3 iproute2 nftables iputils-ping conntrack
+          sudo modprobe ip_gre
+      - name: Fetch and verify the pinned native Paqet candidate
+        run: python3 scripts/qualify_paqet.py --binary /tmp/twinlink-paqet --fetch-only
+      - name: Require native Paqet and host-local GRE evidence without skips
+        run: |
+          sudo env PYTHONDONTWRITEBYTECODE=1 TWINLINK_INTEGRATION=1 PYTHONPATH="$PWD" python3 scripts/qualify_paqet.py --binary /tmp/twinlink-paqet --output /tmp/paqet-evidence.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paqet-${{ matrix.architecture }}-native-evidence
+          path: /tmp/paqet-evidence.json
+          if-no-files-found: warn

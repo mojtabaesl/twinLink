@@ -328,6 +328,13 @@ def _kernel_rules(entry: dict, tunnel: dict, chains: dict[str, list[str]]) -> No
         for offset in range(relay[1] - relay[0] + 1):
             destination_port = destination[0] + (offset if destination[0] != destination[1] else 0)
             chains["prerouting"].append(_rule(f"{ingress} {protocol} dport {relay[0] + offset} dnat to {target}:{destination_port}", name, "peer-dnat", offset))
+            if target == local and entry.get("local_delivery"):
+                chains.setdefault("input", []).append(_rule(
+                    f"{ingress} {protocol} dport {destination_port} ct original proto-dst {relay[0] + offset} ct state new,established accept",
+                    name, "local-input", offset))
+                chains.setdefault("local_output", []).append(_rule(
+                    f"oifname {interface} ip saddr {local} ip daddr {remote} {protocol} sport {destination_port} ct state established accept",
+                    name, "local-reply", offset))
         if target != local:
             match = f"iifname {interface} ip saddr {remote} ip daddr {target} {protocol} dport {_port_text(destination)}"
             chains["postrouting"].append(_rule(f"{match} masquerade", name, "peer-snat"))
@@ -373,7 +380,8 @@ def render_nft(state: dict) -> str:
             continue
         _kernel_rules(entry, tunnel, chains)
     lines = [OWNERSHIP_MARKER + " namespace=ip/twinlink", "# Only this dedicated table is managed by twinlink.", "# The engine replaces this table atomically; no foreign table is flushed.", "# Accept here does not override drops in other firewall base chains.", "table ip twinlink {", '    comment "twinlink-owned"']
-    hooks = {"prerouting": "type nat hook prerouting priority dstnat; policy accept;", "output": "type nat hook output priority -100; policy accept;", "postrouting": "type nat hook postrouting priority srcnat; policy accept;", "forward": "type filter hook forward priority filter; policy accept;"}
+    hooks = {"prerouting": "type nat hook prerouting priority dstnat; policy accept;", "output": "type nat hook output priority -100; policy accept;", "postrouting": "type nat hook postrouting priority srcnat; policy accept;", "forward": "type filter hook forward priority filter; policy accept;",
+             "input": "type filter hook input priority filter; policy accept;", "local_output": "type filter hook output priority filter; policy accept;"}
     for name, rules in chains.items():
         lines += [f"    chain {name} {{", "        " + hooks[name], *rules, "    }"]
     lines.append("}")

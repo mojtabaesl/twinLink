@@ -25,9 +25,11 @@ import tempfile
 import time
 import unittest
 import uuid
+import shlex
+from unittest.mock import patch
 
 from twinlink.engine import ApplyError, Engine
-from twinlink.host import Host, HostError
+from twinlink.host import Host, HostError, parse_ss
 from twinlink.models import validate_forward, validate_tunnel
 from twinlink.render import rathole_config_path
 from twinlink.store import Store
@@ -70,7 +72,7 @@ def _prerequisites():
         return "set TWINLINK_INTEGRATION=1 to opt in to Linux packet-path tests"
     if platform.system() != "Linux" or not hasattr(os, "geteuid") or os.geteuid() != 0:
         return "network namespace tests require Linux and root"
-    missing = [name for name in ("ip", "nft", "ss", "ping", "sysctl", "conntrack") if not shutil.which(name)]
+    missing = [name for name in ("ip", "nft", "ss", "ping", "sysctl", "conntrack", "tc") if not shutil.which(name)]
     if missing:
         return "missing integration dependencies: " + ", ".join(missing)
     return ""
@@ -211,7 +213,10 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
         return process, log_path
 
     def _echo(self, protocol="tcp", port=28080, marker="first"):
-        process, log_path = self._start_process("backend", [sys.executable, "-u", "-c", _SERVER, "10.81.0.2", str(port), protocol, marker])
+        return self._echo_at("backend", "10.81.0.2", protocol, port, marker)
+
+    def _echo_at(self, role, address, protocol="tcp", port=9000, marker="first"):
+        process, log_path = self._start_process(role, [sys.executable, "-u", "-c", _SERVER, address, str(port), protocol, marker])
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
             if "READY" in log_path.read_text():
@@ -220,6 +225,158 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.fail("Backend did not start: " + log_path.read_text())
+
+    def _v2_pair(self, revision, binary=None):
+        """Real v2 resources/processes; systemd scheduling is explicitly emulated."""
+        from twinlink.pair_bundle import credentials
+        from twinlink.profile_runtime import ProfileRuntime
+        from twinlink.profiles import table_name
+        stores, runtimes = {}, {}
+        creds = credentials()
+        testcase = self
+
+        class ProcessHost(NamespaceHost):
+            def __init__(self, role, units):
+                super().__init__(testcase.namespaces[role])
+                self.role, self.units = role, units
+                self.enabled, self.active, self.process_units = set(), set(), {}
+
+            def unit_status(self, name):
+                process = self.process_units.get(name)
+                active = process.poll() is None if process else name in self.active
+                return {"active": active, "enabled": name in self.enabled, "exists": (self.units / name).exists(),
+                        "properties": {"FragmentPath": str(self.units / name), "DropInPaths": "", "UnitFileState": "enabled" if name in self.enabled else "disabled"}}
+
+            def run(self, argv, check=True, input=None, timeout=15):
+                if argv[0] != "systemctl":
+                    return super().run(argv, check, input, timeout)
+                if len(argv) > 2:
+                    action, name = argv[1:3]
+                    if action == "enable": self.enabled.add(name)
+                    if action == "disable": self.enabled.discard(name)
+                    if action == "start":
+                        text = (self.units / name).read_text()
+                        if "Type=simple" in text:
+                            runtimes[self.role].check_prepared_launch(revision, self.role, "direct-paqet")
+                            command = next(line[len("ExecStart="):] for line in text.splitlines() if line.startswith("ExecStart="))
+                            self.process_units[name] = testcase._start_process(self.role, shlex.split(command))[0]
+                        self.active.add(name)
+                    if action == "stop":
+                        if name in self.process_units:
+                            testcase._stop(self.process_units.pop(name))
+                        self.active.discard(name)
+                return {"returncode": 0, "stdout": "", "stderr": ""}
+
+        for role in ("vps1", "vps2"):
+            units = self.directory / ("v2-" + role + "-units")
+            host = ProcessHost(role, units)
+            store = Store(self.directory / ("v2-" + role))
+            runtime = ProfileRuntime(store, host, str(units), paqet_binary=binary or "/missing/paqet", rathole_binary="/missing/rathole")
+            facts = runtime.discover(revision, role) if binary else None
+            with store.lock():
+                store.stage(store.read(), revision, role, creds, facts)
+                runtime.materialize(revision, role)
+            stores[role], runtimes[role] = store, runtime
+        return stores, runtimes
+
+    def _namespace_probe(self, definition, timeout=3):
+        code = "import sys,json;sys.path.insert(0,sys.argv[1]);from twinlink.diagnostics import application_probe;print(json.dumps(application_probe(json.loads(sys.argv[2]),float(sys.argv[3]))))"
+        result = self._ns("vps2", [sys.executable, "-c", code, str(Path(__file__).resolve().parents[2]), json.dumps(definition), str(timeout)])
+        return json.loads(result.stdout)
+
+    def _coordinate(self, stores, runtimes, revision, profile):
+        from twinlink.coordination import Coordinator, steps
+        incoming = None
+        for role, action in steps(profile):
+            with stores[role].lock():
+                result = Coordinator(stores[role], runtimes[role]).advance(revision["pair_id"], revision, profile, incoming)
+            incoming = result["receipt"]
+        with stores["vps2"].lock():
+            Coordinator(stores["vps2"], runtimes["vps2"]).advance(revision["pair_id"], revision, profile, incoming)
+
+    def test_v2_kernel_host_local_tcp_and_udp_coordinated_delivery(self):
+        from twinlink.contracts import new_revision
+        from twinlink.profiles import table_name
+        services = [{"id": protocol, "bind": "198.18.0.1", "protocol": protocol, "ports": "8081",
+                     "backend": {"target": "vps2-local", "ports": "9000"},
+                     "probe": {"kind": "exchange", "request_hex": b"twinlink-packet-path".hex(),
+                               "response_hex": b"first|twinlink-packet-path".hex()}} for protocol in ("tcp", "udp")]
+        r = new_revision("host-local", {"vps1": "198.18.0.1", "vps2": "198.18.0.2"}, services=services)
+        for protocol in ("tcp", "udp"):
+            self._echo_at("vps2", "0.0.0.0", protocol)
+        stores, runtimes = self._v2_pair(r)
+        with patch("twinlink.diagnostics.application_probe", side_effect=self._namespace_probe):
+            self._coordinate(stores, runtimes, r, "gre-kernel")
+        for protocol in ("tcp", "udp"):
+            self._assert_reaches(port=8081, protocol=protocol)
+        rules = json.loads(self._ns("vps2", ["nft", "-j", "list", "table", "ip", table_name(r["pair_id"])]).stdout)
+        for suffix in ("local-input:0", "local-reply:0"):
+            counters = [e["counter"]["packets"] for row in rules["nftables"] if "rule" in row
+                        and row["rule"].get("comment", "").endswith(suffix) for e in row["rule"]["expr"] if "counter" in e]
+            self.assertTrue(counters and all(value > 0 for value in counters), (suffix, rules))
+        # Our ACCEPT cannot override a foreign INPUT DROP.
+        self._ns("vps2", ["nft", "add", "chain", "ip", "twinlink_foreign_test", "input", "{ type filter hook input priority 10; policy drop; }"])
+        self._assert_closed(port=8081)
+        self._ns("vps2", ["nft", "delete", "chain", "ip", "twinlink_foreign_test", "input"])
+        self._ns("vps2", ["nft", "add", "chain", "ip", "twinlink_foreign_test", "output", "{ type filter hook output priority 10; policy drop; }"])
+        self._assert_closed(port=8081, protocol="udp")
+        self._ns("vps2", ["nft", "delete", "chain", "ip", "twinlink_foreign_test", "output"])
+        self._coordinate(stores, runtimes, r, None)
+        self._assert_closed(port=8081)
+        self._assert_foreign_unchanged()
+
+    def test_v2_paqet_native_mixed_ranges_local_remote_and_off(self):
+        """Actual pinned processes and v2 coordinator; not real systemd acceptance."""
+        import hashlib
+        from twinlink import paqet
+        from twinlink.contracts import new_revision
+        binary = os.environ.get("TWINLINK_PAQET_BINARY")
+        if not binary:
+            self.skipTest("set TWINLINK_PAQET_BINARY for native candidate evidence")
+        self.assertEqual(hashlib.sha256(Path(binary).read_bytes()).hexdigest(), paqet.binary_pin(platform.machine())["sha256"])
+        paqet.check_installed_version(binary)
+        for protocol in ("tcp", "udp"):
+            self._echo(protocol=protocol)
+            self._echo_at("vps2", "127.0.0.1", protocol, 9000)
+        services = []
+        for protocol in ("tcp", "udp"):
+            for name, public, backend in (("local", "8081-8082", {"target": "vps2-local", "ports": "9000"}),
+                                           ("remote", "8083-8084", {"target": "address", "address": "10.81.0.2", "ports": "28080"})):
+                services.append({"id": name + protocol, "bind": "198.18.0.1", "protocol": protocol, "ports": public, "backend": backend,
+                    "probe": {"kind": "exchange", "request_hex": b"twinlink-packet-path".hex(), "response_hex": b"first|twinlink-packet-path".hex()}})
+        r = new_revision("native-paqet", {"vps1": "198.18.0.1", "vps2": "198.18.0.2"}, services=services)
+        for role in self.hosts:
+            self._ns(role, ["ip", "link", "set", self.stores[role].read()["tunnels"]["edge"]["interface"], "down"])
+        stores, runtimes = self._v2_pair(r, binary)
+        # Candidate evidence may exercise lifecycle before policy approval.
+        # This override is confined to the harness; it never updates release policy.
+        with patch.object(paqet, "qualification", return_value=[]), patch("twinlink.diagnostics.application_probe", side_effect=self._namespace_probe):
+            self._coordinate(stores, runtimes, r, "direct-paqet")
+            for protocol in ("tcp", "udp"):
+                for port in range(8081, 8085):
+                    self._assert_reaches(port=port, protocol=protocol)
+            for role in runtimes:
+                runtimes[role].verify_local(r, role, "direct-paqet")
+            self._coordinate(stores, runtimes, r, None)
+        for protocol in ("tcp", "udp"):
+            self._assert_closed(port=8081, protocol=protocol)
+        self._assert_foreign_unchanged()
+
+    def test_v2_kernel_loopback_only_backend_rejected_without_standby_gre(self):
+        from twinlink.contracts import new_revision
+        from twinlink.profiles import gre_record
+        from twinlink.store import StateError
+        self._echo_at("vps2", "127.0.0.1", "tcp", 9000)
+        r = new_revision("loopback", {"vps1": "198.18.0.1", "vps2": "198.18.0.2"}, services=[{
+            "id": "app", "bind": "198.18.0.1", "protocol": "tcp", "ports": "8081",
+            "backend": {"target": "vps2-local", "ports": "9000"},
+            "probe": {"kind": "exchange", "request_hex": "61", "response_hex": "62"}}])
+        stores, runtimes = self._v2_pair(r)
+        with patch("twinlink.diagnostics.application_probe", side_effect=self._namespace_probe):
+            with self.assertRaisesRegex(StateError, "loopback-only"):
+                runtimes["vps2"].preflight(r, "vps2", "gre-kernel", stores["vps2"].read()["pairs"][r["pair_id"]], {})
+        self.assertNotIn(gre_record(r, "vps2")["interface"], {row["ifname"] for row in runtimes["vps2"].host.links()})
+        self._assert_foreign_unchanged()
 
     def _request(self, port=18080, protocol="tcp"):
         return self._ns("external", [sys.executable, "-c", _CLIENT, "198.18.0.1", str(port), protocol], check=False)
@@ -238,6 +395,19 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
     def _assert_closed(self, port=18080, protocol="tcp"):
         result = self._request(port, protocol)
         self.assertNotEqual(result.returncode, 0, "disabled/deleted public port still exposed: " + result.stdout)
+
+    def _assert_client_ready(self, process, port=18080, protocol="tcp", timeout=6):
+        """A live process must own the configured socket before a negative probe."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.assertIsNone(process.poll(), "Paqet client exited before listener readiness")
+            rows = parse_ss(self._ns("vps1", ["ss", "-H", "-lntup"]).stdout)
+            if any(row["protocol"] == protocol and row["port"] == port and
+                   row["address"] in ("198.18.0.1", "0.0.0.0") and process.pid in row["pids"] for row in rows):
+                self.assertIsNone(process.poll(), "Paqet client exited during listener readiness")
+                return
+            time.sleep(0.05)
+        self.fail("Paqet client never owned its configured " + protocol + " listener")
 
     def _assert_foreign_unchanged(self):
         for side in self.hosts:
@@ -388,6 +558,7 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
         if not binary or not expected:
             self.skipTest("Paqet candidate requires TWINLINK_PAQET_BINARY and independently trusted TWINLINK_PAQET_SHA256")
         self.assertEqual(hashlib.sha256(Path(binary).read_bytes()).hexdigest(), expected)
+        self.assertEqual(expected, paqet.binary_pin(platform.machine())["sha256"])
         version = subprocess.run([binary, "version"], text=True, capture_output=True, timeout=3, check=True)
         self.assertIn(paqet.VERSION, version.stdout + version.stderr)
         for protocol in ("tcp", "udp"):
@@ -411,6 +582,44 @@ class NetworkNamespaceIntegrationTests(unittest.TestCase):
                     atomic_write(path, paqet.render_config(r, role, facts, creds["paqet"]))
                     processes.append(self._start_process(role, [binary, "run", "-c", str(path)])[0])
                 self._assert_reaches(protocol=protocol)
+                if protocol == "udp":
+                    # KCP fragmentation/reassembly with the selected 1350-byte
+                    # MTU under a 1400-byte WAN link limit, checked externally.
+                    for role in self.hosts:
+                        self._ns(role, ["ip", "link", "set", "wan", "mtu", "1400"])
+                    code = "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(5);s.connect(('198.18.0.1',18080));p=b'x'*3072;s.sendall(p);assert s.recv(65535)==b'first|'+p"
+                    self._ns("external", [sys.executable, "-c", code])
+                    for role in self.hosts:
+                        self._ns(role, ["ip", "link", "set", "wan", "mtu", "1500"])
+                # Lose only server egress on the underlay, leaving client egress
+                # intact. This must cause delivery to fail, then recover.
+                self._ns("vps2", ["tc", "qdisc", "add", "dev", "wan", "root", "netem", "loss", "100%"])
+                try:
+                    self._assert_closed(protocol=protocol)
+                finally:
+                    self._ns("vps2", ["tc", "qdisc", "del", "dev", "wan", "root"])
+                self._assert_reaches(protocol=protocol)
+                # A parser-valid but mismatched key must not deliver traffic.
+                self._stop(processes[-1])
+                path = self.directory / "vps1-candidate.yaml"
+                correct = path.read_text()
+                bad = paqet.render_config(r, "vps1", {"interface": "wan", "source": "198.18.0.1", "gateway": "198.18.0.2",
+                    "router_mac": json.loads(self._ns("vps2", ["ip", "-j", "link", "show", "wan"]).stdout)[0]["address"], "ephemeral_range": [32768, 60999]}, "mismatched-key-0123456789abcdefghijk")
+                atomic_write(path, bad)
+                bad_process = self._start_process("vps1", [binary, "run", "-c", str(path)])[0]
+                self._assert_client_ready(bad_process, protocol=protocol)
+                # Repeated negative exchanges while both processes remain live
+                # cannot count an absent/crashed client as key rejection.
+                for _ in range(3):
+                    self._assert_closed(protocol=protocol)
+                    self.assertIsNone(bad_process.poll(), "Bad-key client exited during rejection test")
+                    self.assertIsNone(processes[0].poll(), "Server exited during rejection test")
+                self._stop(bad_process)
+                atomic_write(path, correct)
+                restored_process = self._start_process("vps1", [binary, "run", "-c", str(path)])[0]
+                self._assert_client_ready(restored_process, protocol=protocol)
+                self._assert_reaches(protocol=protocol)
+                self._stop(restored_process)
                 for process in processes:
                     self._stop(process)
                 self._assert_closed(protocol=protocol)

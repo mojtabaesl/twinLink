@@ -103,11 +103,12 @@ def evidence(source, result, value, offset, role=None, error=None):
 
 def probe_definitions(revision, role, profile):
     from .profiles import expanded_services
+    from .backends import address as backend_address
     definitions = []
     for service in expanded_services(revision):
         public = revision["public_endpoints"]["vps1"] if service["bind"] == "0.0.0.0" else service["bind"]
         for kind, address, port in (("service", public, service["port"]),
-                                    ("backend", service["backend"]["address"], service["target_port"])):
+                                    ("backend", backend_address(revision, service, profile), service["target_port"])):
             if kind == "backend" and role != "vps2":
                 continue
             definitions.append({"id": f"{kind}:{service['id']}:{service['port']}", "kind": kind,
@@ -153,6 +154,21 @@ def application_probe(definition, timeout=3):
                 "latency_ms": (time.monotonic() - start) * 1000 if failed else None}
 
 
+def backend_observation(revision, profile, definition, observations):
+    """Do not turn absent future GRE addresses into confirmed backend failures."""
+    from .backends import local, readiness
+    from .profiles import expanded_services
+    if profile != "gre-kernel" or definition["kind"] != "backend":
+        return None
+    service = next(s for s in expanded_services(revision) if definition["id"] == f"backend:{s['id']}:{s['port']}")
+    if not local(service):
+        return None
+    if "address" not in observations or "listeners" not in observations:
+        return {"result": "unknown", "reason": "Backend binding/address evidence unavailable"}
+    assigned = {a["local"] for row in observations["address"] for a in row.get("addr_info", []) if a.get("family") == "inet"}
+    return readiness(revision, service, profile, assigned, observations["listeners"])
+
+
 def readiness(store, revision, role):
     """Artifact evidence only: never claim standby runtime or peer readiness."""
     from .contracts import digest
@@ -162,7 +178,8 @@ def readiness(store, revision, role):
     rendered = manifests(revision, role, store.credentials(revision["pair_id"], revision["revision"]), facts, store.read()["installation_id"])
     prepared_path = store.preparation_path(revision["pair_id"], revision["revision"])
     prepared = store.private_read(prepared_path) if prepared_path.exists() else {}
-    prepared_matches = prepared.get("config_digest") == digest(revision) and prepared.get("facts_digest") == digest(facts)
+    prepared_matches = (prepared.get("config_digest") == digest(revision) and prepared.get("facts_digest") == digest(facts)
+                        and (revision["schema_version"] == 2 or prepared.get("renderer_version") == 2))
     binary_matches = {}
     import hashlib
     for kind, pin in prepared.get("binaries", {}).items():
@@ -191,6 +208,8 @@ def readiness(store, revision, role):
                 if stream.read(len(expected) + 1) != expected:
                     matching = False
         rows.append({"profile": profile, "revision": revision["revision"], "config_digest": digest(revision),
+            "effective_backends": manifest["effective_backends"], "renderer_version": manifest["renderer_version"],
+            "backend_delivery": "Deferred until explicit preflight/GRE preparation; binding and service-path response required" if role == "vps2" and profile == "gre-kernel" and any(s["backend"].get("target") == "vps2-local" for s in revision["services"]) else "Application exchange required during preflight and activation",
             "compatible": manifest["compatible"], "missing_services": manifest["missing_services"],
             "preparation_errors": manifest["preparation_errors"], "artifacts_match": matching,
             "preparation_matches": prepared_matches,
@@ -296,7 +315,7 @@ def investigate(report, definitions):
             report["overall_status"] = "healthy"
 
 
-def profile_resources(revision, role, profile, observations, installation_id):
+def profile_resources(revision, role, profile, observations, installation_id, facts=None):
     """Compare observed local resources; successful sockets still need exchanges."""
     from .profiles import gre_record, expanded_services, render_kernel
     from .profile_runtime import nft_matches
@@ -319,8 +338,27 @@ def profile_resources(revision, role, profile, observations, installation_id):
             own = ipaddress.IPv4Interface(t["local_private"])
             addresses = [a for r in observations["address"] if r.get("ifname") == t["interface"] for a in r.get("addr_info", []) if a.get("family") == "inet"]
             checks["gre_address"] = len(addresses) == 1 and addresses[0].get("local") == str(own.ip) and addresses[0].get("prefixlen") == own.network.prefixlen
-    if profile == "gre-kernel" and "nft" in observations:
-        script, snapshot = render_kernel(revision, role, installation_id), observations["nft"]
+    needs_nft = profile == "gre-kernel" or profile == "direct-paqet" and role == "vps2"
+    if profile == "direct-paqet" and facts:
+        if "raw-route" in observations:
+            rows = observations["raw-route"]
+            peer = revision["public_endpoints"]["vps1" if role == "vps2" else "vps2"]
+            checks["raw_route"] = (len(rows) == 1 and rows[0].get("dev") == facts["interface"]
+                and rows[0].get("prefsrc", rows[0].get("src")) == facts["source"]
+                and rows[0].get("gateway", peer) == facts["gateway"])
+            if len(rows) == 1 and not rows[0].get("prefsrc", rows[0].get("src")):
+                checks["raw_route"] = None
+        if "raw-neighbor" in observations:
+            rows = observations["raw-neighbor"]
+            checks["raw_neighbor"] = rows[0]["lladdr"].lower() == facts["router_mac"] if len(rows) == 1 and rows[0].get("lladdr") else None
+    if needs_nft and "nft" in observations:
+        if profile == "gre-kernel":
+            script = render_kernel(revision, role, installation_id)
+        else:
+            from .paqet import packet_exceptions
+            from .profiles import table_name
+            script = packet_exceptions(revision, facts, table_name(revision["pair_id"]), installation_id)
+        snapshot = observations["nft"]
         checks["owned_nft"] = nft_matches(script, snapshot)
         if checks["owned_nft"] is False and observations.get("nft_comment_available") is False:
             # Compare all other observed fields without treating unavailable
@@ -338,7 +376,7 @@ def profile_resources(revision, role, profile, observations, installation_id):
             address = str(ipaddress.IPv4Interface(revision["gre"]["addresses"]["vps1"]).ip) if profile == "gre-rathole" else revision["public_endpoints"]["vps1"]
             required.append((address, revision["transport"]["port"], "tcp"))
         checks["listeners"] = all(any(r.get("port") == port and r.get("protocol") == protocol and r.get("address") in (address, "0.0.0.0", "::", "*") for r in observations["listeners"]) for address, port, protocol in required)
-    expected = ({"gre_link", "gre_address"} if profile.startswith("gre-") else set()) | ({"owned_nft"} if profile == "gre-kernel" else set()) | ({"listeners"} if role == "vps1" and profile != "gre-kernel" else set())
+    expected = ({"gre_link", "gre_address"} if profile.startswith("gre-") else set()) | ({"owned_nft"} if needs_nft else set()) | ({"listeners"} if role == "vps1" and profile != "gre-kernel" else set()) | ({"raw_route", "raw_neighbor"} if profile == "direct-paqet" else set())
     return {"result": "fail" if False in checks.values() else "pass" if expected <= checks.keys() and None not in checks.values() else "unknown", "checks": checks}
 
 
@@ -371,6 +409,16 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
         "overall_status": "off" if control and not active and not control["transition"] else "unknown", "findings": [], "collection_errors": [],
         "unknowns": ["Independent Internet vantage not collected", "Peer state is not live", "Standby readiness requires explicit preflight"],
         "redaction_summary": {"level": redaction, "context": "private per-report context; equality only within this report"}, "truncation": []}
+    if revision and active["profile"] == "direct-paqet":
+        from . import paqet
+        preparation_path = store.preparation_path(pair_id, revision["revision"])
+        prepared = store.private_read(preparation_path) if preparation_path.exists() else {}
+        identity = next(row for row in readiness(store, revision, role) if row["profile"] == "direct-paqet")
+        report["versions"]["paqet"] = {"version": paqet.VERSION, "commit": paqet.COMMIT,
+            "prepared_binary": prepared.get("binaries", {}).get("paqet"), "config_digest": digest(revision),
+            "facts": store.facts(pair_id, revision["revision"]), "qualification": paqet.qualification(revision),
+            "prepared_binary_matches": identity["prepared_binary_matches"], "artifacts_match": identity["artifacts_match"],
+            "effective_backends": identity["effective_backends"], "capture_permissions": "unknown; native process/application evidence required"}
     definitions = probe_definitions(revision, role, active["profile"]) if revision else []
     pending = list(definitions)
     commands = [("route", ["ip", "-j", "route", "show"]), ("link", ["ip", "-j", "-d", "-s", "link", "show"]), ("listeners", ["ss", "-H", "-lntup"])]
@@ -386,6 +434,9 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
         peer = "vps2" if role == "vps1" else "vps1"
         commands.append(("public-peer", ["ping", "-n", "-c", "1", "-W", "1", revision["public_endpoints"][peer]]))
         facts = store.facts(pair_id, revision["revision"])
+        if active["profile"] == "direct-paqet" and facts:
+            commands += [("raw-route", ["ip", "-j", "route", "get", revision["public_endpoints"][peer]]),
+                         ("raw-neighbor", ["ip", "-j", "neigh", "show", "to", facts["gateway"], "dev", facts["interface"]])]
         if facts:
             commands.append(("gateway", ["ping", "-n", "-c", "1", "-W", "1", facts["gateway"]]))
         if active["profile"].startswith("gre-"):
@@ -394,8 +445,19 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
                 str(ipaddress.IPv4Interface(revision["gre"]["addresses"][peer]).ip)]))
     if deep:
         commands.append(("conntrack", ["conntrack", "-S"]))
+        if revision and active["profile"] == "direct-paqet" and role == "vps1":
+            pin = prepared.get("binaries", {}).get("paqet", {})
+            try:
+                trusted = pin.get("sha256") == paqet.binary_pin(platform.machine())["sha256"]
+            except ValueError:
+                trusted = False
+            if trusted and identity["prepared_binary_matches"] and identity["artifacts_match"] and identity["preparation_matches"]:
+                commands.append(("paqet-ping", [pin["path"], "ping", "-c", str(store.revision_path(pair_id, revision["revision"]) / role / "direct-paqet" / "config.yaml")]))
+            else:
+                report["unknowns"].append("Native Paqet ping not run: verified binary/config preparation unavailable")
     deadline, next_sample = start + (duration or (60 if deep else 15)), start
     seen_logs, seen_errors, size, count = set(), set(), len(json.dumps(report)), 0
+    previous_counters = {}
     probe_starts = []
     def reserve_probes(number):
         # A sliding one-second window, shared by ICMP and application probes.
@@ -461,8 +523,8 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
                     known = value["returncode"] == 0 and not value.get("error") and not value.get("truncated")
                     collected, result = value.get("stdout", ""), "pass" if known else "unknown"
                     try:
-                        if known and name in ("route", "link", "address"):
-                            allowed = {"dst", "gateway", "prefsrc", "src", "dev", "ifname", "ifindex", "mtu", "flags", "operstate", "stats64", "stats", "link_index", "ifalias", "linkinfo", "addr_info"}
+                        if known and name in ("route", "link", "address", "raw-route", "raw-neighbor"):
+                            allowed = {"dst", "gateway", "prefsrc", "src", "dev", "ifname", "ifindex", "mtu", "flags", "operstate", "stats64", "stats", "link_index", "ifalias", "linkinfo", "addr_info", "lladdr", "state"}
                             collected = [{k: v for k, v in row.items() if k in allowed} for row in json.loads(collected)]
                         elif known and name == "listeners":
                             from .host import parse_ss
@@ -483,13 +545,23 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
                             from .host import recover_nft_table_comments
                             collected = recover_nft_table_comments(json.loads(collected), {
                                 table_name(pair_id): "twinlink:" + state["installation_id"]}, nft_comment_command)
+                        elif name == "paqet-ping":
+                            collected = {"sent": known, "output": collected, "delivery": "unknown; pinned ping sends without waiting for a reply"}
+                            result = "unknown"
                     except (ValueError, TypeError, AttributeError):
                         known, result, collected = False, "unknown", None
                     if known:
                         observations[name] = collected
+                        if name == "nft":
+                            counters = {row["rule"].get("comment", ""): expr["counter"].get("packets")
+                                for row in collected.get("nftables", []) if "rule" in row
+                                for expr in row["rule"].get("expr", []) if "counter" in expr}
+                            deltas = {key: value - previous_counters[key] if type(value) is int and type(previous_counters.get(key)) is int and value >= previous_counters[key] else None for key, value in counters.items()}
+                            append("firewall_conntrack", evidence("nft-counters", "pass", {"packets": counters, "deltas": deltas}, clock() - start, role))
+                            previous_counters = counters
                     if name in ("public-peer", "gateway", "gre-peer"):
                         result = "pass" if known else "fail" if value["returncode"] == 1 else "unknown"
-                    bucket = "interface_route_samples" if name in ("route", "link", "address") else "firewall_conntrack" if name in ("nft", "conntrack") else "profile_evidence" if name in ("public-peer", "gateway", "gre-peer") else "processes_systemd"
+                    bucket = "interface_route_samples" if name in ("route", "link", "address", "raw-route", "raw-neighbor") else "firewall_conntrack" if name in ("nft", "conntrack") else "profile_evidence" if name in ("public-peer", "gateway", "gre-peer") else "processes_systemd"
                     append(bucket, evidence(name, result, collected, clock() - start, role, value.get("error") or ("Command failed/unparseable" if not known else None)))
                     if not known and name not in seen_errors:
                         report["collection_errors"].append({"collector": name, "result": "unknown", "error": value.get("error") or "Command failed/unparseable"})
@@ -498,7 +570,7 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
                         report["truncation"].append(name)
             if active:
                 try:
-                    resources = profile_resources(revision, role, active["profile"], observations, state["installation_id"])
+                    resources = profile_resources(revision, role, active["profile"], observations, state["installation_id"], store.facts(pair_id, revision["revision"]))
                 except (ValueError, TypeError, KeyError, AttributeError):
                     resources = {"result": "unknown", "checks": {}, "error": "Unparseable profile resource observation"}
                 append("profile_evidence", evidence("profile-resources", resources["result"], resources, clock() - start, role))
@@ -514,10 +586,19 @@ def collect(store, pair_id=None, deep=False, duration=0, interval=1, redaction="
                     pending = batch + pending
                     break
                 timeout = min(3, deadline - clock())
-                futures = [(definition, pool.submit(probe_fn, definition, timeout=timeout)) for definition in batch]
-                for definition, future in futures:
-                    outcome = future.result()
+                futures = []
+                for definition in batch:
+                    status = backend_observation(revision, active["profile"], definition, observations)
+                    adjusted = {**definition, "address": status.get("probe_address", definition["address"])} if status else definition
+                    future = pool.submit(probe_fn, adjusted, timeout=timeout) if not status or status["result"] not in ("fail", "unknown") else None
+                    futures.append((definition, status, future))
+                for definition, status, future in futures:
+                    outcome = future.result() if future else {"result": status["result"], "error": status["reason"]}
+                    if status and status["result"] == "deferred" and outcome["result"] == "pass":
+                        outcome = {**outcome, "result": "unknown", "error": status["reason"]}
                     detail = {k: v for k, v in definition.items() if k != "exchange"}
+                    if status:
+                        detail["readiness"] = status
                     detail["latency_ms"] = outcome.get("latency_ms")
                     item = evidence("application-exchange", outcome["result"], detail, clock() - start, role, outcome.get("error"))
                     item["probe_definition"] = definition["id"]

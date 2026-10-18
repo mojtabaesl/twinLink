@@ -18,6 +18,7 @@ from .profiles import manifests, gre_record, table_name, kernel_state, expanded_
 from .render import _command
 from .store import StateError, reject_symlink
 from . import paqet, rathole
+from .backends import readiness as backend_readiness
 
 
 def nft_expectation(script):
@@ -189,12 +190,19 @@ Unit={expiry_service}
                     rathole.check_version(path)
                 except ValidationError:
                     continue
-            elif checksum not in paqet.TRUSTED_BINARY_HASHES.values():
-                continue
+            else:
+                try:
+                    pin = paqet.binary_pin(paqet.platform.machine())
+                    if checksum != pin["sha256"]:
+                        continue
+                    paqet.check_installed_version(path)
+                except ValidationError:
+                    continue
             prepared[kind] = {"path": str(path), "sha256": checksum}
         self.ledger.write_file(self.store.preparation_path(pair, revision["revision"]), canonical({
             "config_digest": digest(revision), "facts_digest": digest(facts), "binaries": prepared,
-            "prepared_at": time.time(), "units": True}).decode(), pair)
+            "prepared_at": time.time(), "units": True,
+            "renderer_version": 2 if revision["schema_version"] >= 3 else 1}).decode(), pair)
         return prepared
 
     def set_enablement(self, unit, owner, enabled):
@@ -232,6 +240,8 @@ Unit={expiry_service}
                 checksum.update(chunk)
         if checksum.hexdigest() != pin.get("sha256"):
             raise StateError("Prepared binary changed")
+        if profile == "direct-paqet" and pin.get("sha256") != paqet.binary_pin(paqet.platform.machine())["sha256"]:
+            raise StateError("Prepared Paqet binary does not match this architecture's release identity")
 
     def check_prepared_launch(self, revision, role, profile):
         """Read-only launch checks; no mutation lock, probes or binary execution."""
@@ -243,6 +253,8 @@ Unit={expiry_service}
         if (not isinstance(prepared, dict) or prepared.get("config_digest") != digest(revision)
                 or prepared.get("facts_digest") != digest(facts) or prepared.get("units") is not True):
             raise StateError("Preparation is stale; config regenerate required")
+        if revision["schema_version"] >= 3 and prepared.get("renderer_version") != 2:
+            raise StateError("Renderer preparation is stale; config regenerate required")
         prepared_path = self.store.preparation_path(pair, number)
         self.ledger.check("file:" + str(prepared_path), self.ledger.file_value(prepared_path))
         generated = manifests(revision, role, self.store.credentials(pair, number), facts, self.store.read()["installation_id"])[profile]
@@ -259,6 +271,8 @@ Unit={expiry_service}
                     raise StateError("Prepared artifact drift; config regenerate required")
             self.ledger.check("file:" + str(path), self.ledger.file_value(path))
         self.check_prepared_binary(prepared, profile)
+        if profile == "direct-paqet" and self.discover(revision, role) != facts:
+            raise StateError("Paqet local route/NIC/MAC facts changed; config regenerate required")
         self.assert_unit_safe(self.runtime_unit(revision, profile))
 
     def expiry_units(self, pair):
@@ -300,6 +314,8 @@ Unit={expiry_service}
         generated = manifests(revision, role, self.store.credentials(pair, revision["revision"]), facts, self.store.read()["installation_id"])[profile]
         if not generated["compatible"] or generated["preparation_errors"]:
             raise ValidationError("Profile incompatible/unprepared: " + json.dumps(generated["missing_services"] + generated["preparation_errors"]))
+        if profile == "direct-paqet" and (not facts or facts["source"] != revision["public_endpoints"][role]):
+            raise ValidationError("Paqet NAT topology is not qualified; local route source must equal its public endpoint")
         missing_probes = [service["id"] for service in revision["services"] if service["probe"] is None]
         if missing_probes:
             raise ValidationError("Configure a safe application exchange probe before cutover for: " + ", ".join(missing_probes))
@@ -358,6 +374,8 @@ Unit={expiry_service}
         prepared = self.store.private_read(prepared_path)
         if prepared.get("config_digest") != digest(revision) or prepared.get("facts_digest") != digest(facts) or not prepared.get("units"):
             raise StateError("Preparation is stale; config regenerate required")
+        if revision["schema_version"] >= 3 and prepared.get("renderer_version") != 2:
+            raise StateError("Renderer preparation is stale; config regenerate required")
         coordinator = "twinlink-v2-restore.service"
         status = self.assert_unit_safe(coordinator)
         if not status["enabled"] or status.get("properties", {}).get("UnitFileState", "enabled") != "enabled":
@@ -379,11 +397,21 @@ Unit={expiry_service}
         if role == "vps2" and profile == "gre-kernel":
             t = gre_record(revision, role)
             private = str(ipaddress.IPv4Interface(t["local_private"]).ip)
-            for entry in kernel_state(revision, role)["forwards"].values():
+            entries = list(kernel_state(revision, role)["forwards"].values())
+            local_backends = {(entry["protocol"], port) for entry in entries
+                              if entry["destination_address"] == private
+                              for port in range(ports(entry["destination_port"])[0], ports(entry["destination_port"])[1] + 1)}
+            # Any declared local backend can overlap another mapping's relay.
+            # The application exchanges below must still prove those sockets;
+            # undeclared relay listeners remain conflicts.
+            relay_listeners = [listener for listener in listeners if not (
+                (listener.get("protocol", "tcp"), listener.get("port")) in local_backends
+                and listener.get("address", "0.0.0.0") in (private, "0.0.0.0"))]
+            for entry in entries:
                 first, last = ports(entry["relay_port"])
                 if any(first <= p <= last for p in protected):
                     raise ValidationError("Kernel relay conflicts with a management port")
-                _listener_conflict(private, entry["relay_port"], entry["protocol"], listeners, None)
+                _listener_conflict(private, entry["relay_port"], entry["protocol"], relay_listeners, None)
         for listener in listeners:
             # Only cgroup + exact managed unit ownership can excuse an old socket.
             pids = listener.get("pids", [])
@@ -406,15 +434,24 @@ Unit={expiry_service}
                 if service["bind"] != "0.0.0.0" and service["bind"] not in assigned:
                     raise ValidationError("Public service bind is not assigned locally")
         else:
-            self.probe_backends(revision)
+            return {"backend_checks": self.probe_backends(revision, profile=profile), "service_path": "pending peer activation and exact application verification",
+                    "host_policy": "unknown until service-path exchange; owned ACCEPT does not override foreign DROP"}
+        return {"service_path": "pending peer activation and exact application verification", "host_policy": "unknown until service-path exchange"}
 
-    def probe_backends(self, revision, budget=60):
+    def probe_backends(self, revision, budget=60, profile="gre-kernel", allow_deferred=True):
         """Prove the proposed VPS2 backend bytes before withdrawing runtime."""
         from .diagnostics import application_probe
-        deadline, checked = time.monotonic() + budget, set()
+        deadline, checked, results = time.monotonic() + budget, set(), []
+        assigned = {a["local"] for row in self.host.addresses() for a in row.get("addr_info", []) if a.get("family") == "inet"}
+        listeners = self.host.listeners()
         for service in expanded_services(revision):
             probe = service["probe"]
-            identity = (service["protocol"], service["backend"]["address"], service["target_port"],
+            if probe is None:
+                raise StateError("Application exchange recipe is missing for " + service["id"])
+            readiness = backend_readiness(revision, service, profile, assigned, listeners, allow_deferred=allow_deferred)
+            if readiness["result"] == "fail":
+                raise StateError(readiness["reason"] + ": " + service["id"])
+            identity = (service["protocol"], readiness["probe_address"], service["target_port"],
                         probe["request_hex"], probe["response_hex"])
             if identity in checked:
                 continue
@@ -428,6 +465,8 @@ Unit={expiry_service}
             if time.monotonic() >= deadline:
                 raise StateError("Backend preflight exceeded its 60-second budget")
             checked.add(identity)
+            results.append({**readiness, "application": outcome["result"], "port": service["target_port"]})
+        return results
 
     def _table_value(self, table):
         snapshot = self._table_snapshot(table)
@@ -566,9 +605,24 @@ Unit={expiry_service}
             raise StateError("GRE address drift")
         if not any(l["ifname"] == t["interface"] and "UP" in l.get("flags", []) for l in self.host.links()):
             raise StateError("GRE link is down")
+        from .backends import local
+        if role == "vps2" and any(local(s) for s in revision["services"]):
+            network = str(ipaddress.IPv4Interface(t["local_private"]).network)
+            if not any(route.get("dst") == network and route.get("dev") == t["interface"] for route in self.host.routes()):
+                raise StateError("GRE connected return route is missing for the VPS2-local backend")
+            peer = str(ipaddress.IPv4Interface(t["remote_private"]).ip)
+            try:
+                selected = json.loads(self.host.run(["ip", "-j", "route", "get", peer], timeout=3)["stdout"])
+            except (ValueError, KeyError):
+                raise StateError("GRE backend return-route lookup unavailable") from None
+            if len(selected) != 1 or selected[0].get("dev") != t["interface"]:
+                raise StateError("GRE backend replies would use a different return route")
 
     def start(self, revision, role, profile, control, tx):
         if profile == "gre-kernel":
+            if role == "vps2":
+                self._verify_gre(revision, role)
+                self.probe_backends(revision, profile=profile, allow_deferred=False)
             resource, owner = "sysctl:net.ipv4.ip_forward", revision["pair_id"]
             before = self.host.run(["sysctl", "-n", "net.ipv4.ip_forward"])["stdout"].strip()
             self.ledger.begin(resource, "sysctl", owner, before, "1", "restore-sysctl")
@@ -703,7 +757,7 @@ Unit={expiry_service}
             self.ledger.check("link:" + interface, self._link_value(interface))
         if profile == "gre-kernel" or profile == "direct-paqet" and role == "vps2":
             self.ledger.check("nft:" + table_name(revision["pair_id"]), self._table_value(table_name(revision["pair_id"])))
-        elif profile:
+        if profile and profile != "gre-kernel":
             if not self.assert_unit_safe(self.runtime_unit(revision, profile))["active"]:
                 raise StateError("Transport process stopped during verification")
 
@@ -741,30 +795,14 @@ Unit={expiry_service}
             if probe is None:
                 raise Pending("Pending verification: configure a safe application exchange probe for every service")
             address = revision["public_endpoints"]["vps1"] if service["bind"] == "0.0.0.0" else service["bind"]
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM if service["protocol"] == "tcp" else socket.SOCK_DGRAM) as sock:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise StateError("Application verification exceeded 60 seconds")
-                sock.settimeout(min(3, remaining))
-                sock.connect((address, service["port"]))
-                sock.sendall(bytes.fromhex(probe["request_hex"]))
-                expected = bytes.fromhex(probe["response_hex"])
-                if service["protocol"] == "udp":
-                    if sock.recv(65535) != expected:
-                        raise StateError("Application response mismatch for " + service["id"])
-                    continue
-                received = b""
-                while len(received) < len(expected):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise StateError("Application verification exceeded 60 seconds")
-                    sock.settimeout(min(3, remaining))
-                    chunk = sock.recv(len(expected) - len(received))
-                    if not chunk:
-                        break
-                    received += chunk
-                if received != expected:
-                    raise StateError("Application response mismatch for " + service["id"])
+            from .diagnostics import application_probe
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise StateError("Application verification exceeded 60 seconds")
+            result = application_probe({"address": address, "port": service["port"],
+                "protocol": service["protocol"], "exchange": probe}, timeout=min(3, remaining))
+            if result["result"] != "pass":
+                raise StateError("Application response mismatch or failed exchange for " + service["id"] + ": " + str(result.get("error")))
 
     def boot(self):
         state = self.store.read()

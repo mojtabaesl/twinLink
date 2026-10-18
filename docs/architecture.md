@@ -18,12 +18,14 @@ conflict. Selection is manual; automatic failover and GRE + Paqet are excluded.
 
 Kernel supports bounded TCP/UDP ranges but cannot DNAT to VPS2 loopback. Rathole
 0.5.0 accepts TCP and can reach loopback backends. The Paqet candidate is
-`v1.0.0-alpha.21`; runtime qualification pins and qualified protocols remain empty.
-No Paqet TCP/UDP delivery support is claimed.
+`v1.0.0-alpha.21`. TCP/UDP mapping types are recognized, but per-architecture
+protocol qualification remains empty. Activation remains unavailable pending
+native packet and systemd/real-host acceptance.
 
-The separate `paqet install` command has pinned archive/executable hashes for
-Linux x86_64/ARM64. These authenticate installation without enabling runtime
-qualification. Newly installed binaries enter the ownership ledger for conditional
+`paqet_release.py` holds one version/commit/architecture manifest for installation
+and runtime binary identity. Installation pins authenticate Linux x86_64/ARM64
+executables without qualifying packet behavior. Protocol evidence must match
+the exact executable hash, renderer version and transport settings. Newly installed binaries enter the ownership ledger for conditional
 cleanup; existing external binaries remain unowned.
 
 A pair has one `transport.port`: Rathole connects to VPS1's public address in
@@ -37,6 +39,21 @@ VPS1 authors immutable revisions. VPS2 imports them with authenticated lineage
 checks. Staging N+1 retains N's active runtime until an explicit coordinated
 switch. Active, staged and last-good resources remain available for recovery;
 retained canonical revisions can be exported to transfer intermediate edits.
+
+New revisions use schema 3 with tagged backend intent: `vps2-local` or an explicit
+`address`. `backends.py` resolves intent without mutating configuration. Schema-2
+revisions remain readable and render with their original version; their address
+is always explicit. Only a newly authored revision promotes the schema, retaining
+the previous digest as its parent. Host state and the authenticated `p2.` envelope
+remain v2. Both peers must support schema 3 before importing new revisions.
+
+VPS2-local kernel delivery terminates in host INPUT after relay-port DNAT; scoped
+input/reply counters match the owned GRE path and original translated port.
+Remote targets retain forwarding/masquerade. No loopback routing or implicit
+proxy is introduced. Foreign INPUT/OUTPUT policy still applies. Before GRE
+exists, wildcard binding plus a loopback exchange is preliminary only; exact GRE
+target delivery is checked after preparation and before VPS1 exposure. Final
+service-path exchanges remain mandatory before commit.
 
 Default storage is `/var/lib/twinlink`:
 
@@ -98,7 +115,7 @@ per pair and reports active-unverified state. Interrupted transitions remain off
 
 | Modules | Responsibility |
 | --- | --- |
-| `contracts.py`, `profiles.py`, `paqet.py` | Shared validation, capabilities and rendering |
+| `contracts.py`, `backends.py`, `profiles.py`, `paqet.py`, `paqet_release.py` | Shared validation, target resolution, release identity, capabilities and rendering |
 | `store.py`, `pair_bundle.py` | Private revisions, atomic state writes and pairing trust |
 | `coordination.py`, `profile_runtime.py` | Receipt barriers, local runtime and expiry withdrawal |
 | `ownership.py`, `cleanup.py`, `baseline.py` | Evidence, conditional restoration and authenticated cleanup |

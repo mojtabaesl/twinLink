@@ -87,8 +87,42 @@ class PaqetInstallTests(unittest.TestCase):
 
     def run_cli(self, *args):
         with patch.object(cli, "Host", return_value=self.host), contextlib.redirect_stdout(io.StringIO()) as out:
-            code = cli.main(["--state-dir", str(self.store.directory), "--paqet-binary", str(self.binary), "paqet", "install", *args])
+            code = cli.main(["--state-dir", str(self.store.directory), "--paqet-binary", str(self.binary), "paqet", "install", "--json", *args])
         return code, json.loads(out.getvalue())
+
+    def test_cli_concise_default_and_opt_in_installation_details(self):
+        base = ["--state-dir", str(self.store.directory), "--paqet-binary", str(self.binary)]
+        with self.installer() as (download, _), patch.object(cli, "Host", return_value=self.host):
+            for flags, expected in (([], "preview"), (["--apply", "--yes"], "completed"),
+                                    (["--apply", "--yes"], "already installed")):
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(cli.main(base + ["paqet", "install", *flags]), 0)
+                self.assertIn("Paqet installation: " + expected, out.getvalue())
+                self.assertIn(str(self.binary), out.getvalue())
+                self.assertNotIn("archive_sha256", out.getvalue())
+                self.assertNotIn("https://", out.getvalue())
+            self.assertEqual(download.call_count, 1)
+            for flags in (["--verbose", "paqet", "install"], ["paqet", "install", "--verbose"],
+                          ["paqet", "install", "--json"]):
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(cli.main(base + flags), 0)
+                result = json.loads(out.getvalue())
+                self.assertEqual(result["schema_version"], 2)
+                self.assertIn("archive_sha256", result)
+                self.assertIn("binary_sha256", result)
+                self.assertIn("url", result)
+
+    def test_cli_default_error_is_concise_and_verbose_error_is_structured(self):
+        base = ["--state-dir", str(self.store.directory), "--paqet-binary", str(self.binary), "paqet", "install"]
+        with self.installer(), patch.object(cli, "Host", return_value=self.host), \
+             patch.object(paqet, "install_plan", side_effect=ValidationError("Unsupported architecture")):
+            with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.main(base), 2)
+            self.assertIn("Unsupported architecture", err.getvalue())
+            self.assertEqual(out.getvalue(), "")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(cli.main(base + ["--verbose"]), 2)
+            self.assertEqual(json.loads(err.getvalue())["status"], "invalid")
 
     def test_official_architecture_aliases_and_preview_are_read_only(self):
         pins = paqet.INSTALL_RELEASES
@@ -119,8 +153,8 @@ class PaqetInstallTests(unittest.TestCase):
         self.assertEqual(row["status"], "complete")
         self.assertIsNone(row["before"])
         self.assertEqual(row["after"]["sha256"], hashlib.sha256(self.payload).hexdigest())
-        self.assertFalse(paqet.TRUSTED_BINARY_HASHES)
-        self.assertFalse(paqet.QUALIFIED_PROTOCOLS)
+        self.assertEqual(paqet.binary_pin("x86_64")["sha256"], paqet.RELEASE_MANIFEST["architectures"]["amd64"]["binary_sha256"])
+        self.assertFalse(any(paqet.RELEASE_MANIFEST["qualification"].values()))
 
     def test_reuse_checks_version_without_download_or_adopting_external_binary(self):
         atomic_write(self.binary, self.payload, 0o755)

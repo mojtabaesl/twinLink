@@ -23,7 +23,7 @@ from twinlink.store import Store, StateError, atomic_write
 
 class LedgerReviewTests(V2Fixture):
     def test_thirteen_large_revisions_remain_recoverable_and_deletable(self):
-        self.r["services"][0].update(ports="8000-8255", backend={"address": "10.20.30.40", "ports": "80"})
+        self.r["services"][0].update(ports="8000-8255", backend={"target": "address", "address": "10.20.30.40", "ports": "80"})
         state = self.stage()
         state["pairs"]["edge"].update(active={"revision": 1, "profile": "gre-kernel", "epoch": 1}, epoch=1)
         self.store.write(state)

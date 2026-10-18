@@ -60,9 +60,9 @@ New installations are journaled with binary fingerprints for conditional removal
 Retry the same install after interruption. A matching pre-existing executable is
 validated and reused without being adopted; edited binaries are preserved as
 cleanup conflicts. Full local uninstall removes the unchanged binary installed
-by TwinLink. The runtime binary qualification registry and TCP/UDP qualification
-gates remain unchanged: installing the candidate does not make `direct-paqet`
-activatable.
+by TwinLink. Installation and preparation share the reviewed release identity;
+protocol qualification is separate. Installing the candidate does not make
+`direct-paqet` activatable. See [qualification evidence](paqet-qualification.md).
 
 ## Test backend
 
@@ -107,11 +107,51 @@ print("Service exchange passed")
 PYTHON
 ```
 
+## Backend intent and bindings
+
+Omit `--backend-address` when adding a service to select VPS2 itself. The saved
+target is `vps2-local`, not an address chosen for the current profile. Kernel
+delivery resolves to the IP in `gre.addresses.vps2`; Rathole and the Paqet
+candidate resolve to `127.0.0.1`. An explicit address remains unchanged across
+profiles and GRE edits. Explicit loopback stays kernel-incompatible.
+
+For operation across kernel and proxy profiles, the application must listen on
+IPv4 `0.0.0.0:PORT` or deliberate bindings covering both GRE and loopback.
+Wildcard binding includes public interfaces: restrict direct backend access in
+your own firewall. IPv6 wildcard binding alone is not proof of IPv4 delivery.
+TwinLink never changes the application, enables `route_localnet`, creates an
+implicit proxy, or relaxes other firewall tables.
+
+On edit, omitted target options preserve the current setting. To reset it:
+
+```sh
+sudo twinlink service edit echo --pair edge --backend-local --apply --yes
+```
+
+Previews show effective targets for every profile. Before a direct-to-GRE
+switch, the future GRE address may not exist. A wildcard listener and successful
+loopback exchange allow preliminary preflight with `deferred-local` status;
+checks/doctor do not create standby GRE. Loopback-only binding is rejected for
+kernel delivery. After both hosts withdraw and GRE is prepared, VPS2 must pass
+the exact resolved-address exchange before VPS1 exposes the public port.
+Failure leaves the transition requiring coordinated rollback. Exact public
+service-path responses are still required before commit; preliminary checks do
+not prove delivery through foreign INPUT/OUTPUT or provider policies.
+
+Kernel local delivery is public → VPS1 DNAT/SNAT → GRE → VPS2 relay DNAT to its
+GRE address/backend port → INPUT → application → OUTPUT/GRE → reverse NAT.
+Permit this scoped path in your existing host/provider firewall. TwinLink's
+owned ACCEPT cannot override a different base chain's DROP. Explicit remote
+backends use the existing forwarded/masqueraded return path.
+
 ## Preparation and shared edits
 
 VPS1 owns shared settings. A change creates a new immutable revision; the
 running revision remains selected until a coordinated switch. VPS2 imports
 shared settings rather than re-entering addresses, ports or mappings.
+New revisions use schema 3; upgrade both peers before transfer. Existing
+schema-2 revisions retain their address interpretation and digest until a new
+revision is authored. Active artifacts and rollback history are preserved.
 
 For one edit, on VPS1:
 

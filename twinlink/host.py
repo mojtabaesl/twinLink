@@ -204,6 +204,9 @@ def _rendered_rule_expressions(line: str) -> tuple[str, list[dict[str, Any]]]:
             states = tokens[index + 2].split(",")
             right = {"set": states} if len(states) > 1 else states[0]
             op, advance = "==", 3
+        elif word == "ct" and tokens[index + 1:index + 3] == ["original", "proto-dst"]:
+            left = {"ct": {"key": "proto-dst", "dir": "original"}}
+            right, op, advance = int(tokens[index + 3]), "==", 4
         elif word in ("dnat", "snat") and tokens[index + 1] == "to":
             endpoint = tokens[index + 2]
             action: dict[str, Any] = {"addr": endpoint}

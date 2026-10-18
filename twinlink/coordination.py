@@ -212,7 +212,9 @@ class Coordinator:
         tx["receipt_refresh"] = {"step": action, "status": "pending", "requested_at": self.clock()}
         self.store.write(state)
         try:
-            self.runtime.revalidate(revision, control["role"], tx["target"], control, {**tx, "refresh_step": action})
+            readiness = self.runtime.revalidate(revision, control["role"], tx["target"], control, {**tx, "refresh_step": action})
+            if action == "preflight" and isinstance(readiness, dict):
+                tx["local_readiness"] = readiness
             if "verification_deadline" in tx and self.verification_expired(tx) and not self.verified(tx):
                 raise StateError("Verification deadline expired during receipt revalidation")
             result = renew_receipt(saved, key, self.clock())
@@ -412,7 +414,9 @@ class Coordinator:
                 self.runtime.arm_verification_expiry(revision, role, target, c, tx)
             if action in ("preflight", "quiesce", "prepare", "start", "verify"):
                 local_tx = {**tx, "previous": tx.get("local_previous", tx["previous"])} if target is None else tx
-                getattr(self.runtime, action)(revision, role, target, c, local_tx)
+                readiness = getattr(self.runtime, action)(revision, role, target, c, local_tx)
+                if action == "preflight" and isinstance(readiness, dict):
+                    tx["local_readiness"] = readiness
                 if action == "verify" and self.verification_expired(tx):
                     raise StateError("Verification exceeded its original deadline")
                 if target is None and action == "quiesce":
@@ -477,7 +481,7 @@ class Coordinator:
         latest = tx.get("last_receipt")
         refresh = ({"refresh_command": f"{command} --transaction {tx['transaction_id']} --step {latest['body']['step']} --refresh-receipt --output NEW_RECEIPT --apply --yes"}
                    if latest and latest["body"]["role"] == tx.get("local_role") else {})
-        return {"status": "pending", **withdrawal, **refresh, "phase": tx["phase"], "transaction": tx["transaction_id"],
+        return {"status": "pending", **withdrawal, **refresh, **({"local_readiness": tx["local_readiness"]} if "local_readiness" in tx else {}), "phase": tx["phase"], "transaction": tx["transaction_id"],
                 "next_host": next_role, "next_step": action,
                 "next_command": f"{command} --transaction {tx['transaction_id']} --step {action} --receipt-file RECEIPT --output NEXT_RECEIPT --apply --yes",
                 "peer_evidence": "Timestamped authenticated receipt; peer is not queried live"}

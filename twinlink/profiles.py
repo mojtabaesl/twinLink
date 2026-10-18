@@ -6,8 +6,9 @@ import json
 from .contracts import PROFILES, digest, validate_revision
 from .models import ports, interface_name, ValidationError
 from . import paqet
+from .backends import address as backend_address
 
-RENDERER_VERSION = 1
+RENDERER_VERSION = 2
 
 
 def table_name(pair_id):
@@ -39,12 +40,12 @@ def capabilities(revision, profile):
         reason = None
         if "rathole" in profile and s["protocol"] != "tcp":
             reason = "Pinned Rathole supports qualified TCP only"
-        elif profile == "gre-kernel" and ipaddress.IPv4Address(s["backend"]["address"]).is_loopback:
+        elif profile == "gre-kernel" and ipaddress.IPv4Address(backend_address(revision, s, profile)).is_loopback:
             reason = "Kernel DNAT cannot target VPS2 loopback"
-        elif profile == "direct-paqet" and s["protocol"] not in paqet.QUALIFIED_PROTOCOLS:
-            reason = "Paqet " + s["protocol"].upper() + " requires pinned-version packet qualification"
         if reason:
             reasons.append({"service": s["id"], "reason": reason})
+    if profile == "direct-paqet":
+        reasons.extend({"service": None, "reason": reason} for reason in paqet.qualification(revision))
     return {"compatible": not reasons, "missing_services": reasons}
 
 
@@ -70,9 +71,9 @@ def kernel_state(revision, role):
         # Reserve the same deterministic relay space on both ends.
         state["forwards"][s["name"]] = {"name": s["name"], "tunnel": t["name"], "side": role,
             "mode": "kernel", "protocol": s["protocol"], "bind_address": s["bind"],
-            "bind_port": str(s["port"]), "destination_address": s["backend"]["address"],
+            "bind_port": str(s["port"]), "destination_address": backend_address(revision, s, "gre-kernel"),
             "destination_port": str(s["target_port"]), "relay_port": str(relay),
-            "running": True, "enabled": False}
+            "running": True, "enabled": False, **({"local_delivery": True} if revision["schema_version"] >= 3 else {})}
     return state
 
 
@@ -96,7 +97,7 @@ def render_rathole(revision, role, profile, credentials):
              f"default_token = {json.dumps(token)}", "", f"[{kind}.transport]", 'type = "noise"', "",
              f"[{kind}.transport.noise]", f'{"local_private_key" if server else "remote_public_key"} = {json.dumps(noise)}']
     for s in expanded_services(revision):
-        address = f"{s['bind']}:{s['port']}" if server else f"{s['backend']['address']}:{s['target_port']}"
+        address = f"{s['bind']}:{s['port']}" if server else f"{backend_address(revision, s, profile)}:{s['target_port']}"
         lines += ["", f"[{kind}.services.{json.dumps(s['name'])}]", 'type = "tcp"',
                   f'{"bind_addr" if server else "local_addr"} = {json.dumps(address)}']
     return "\n".join(lines) + "\n"
@@ -124,7 +125,8 @@ def manifests(revision, role, credentials, facts=None, installation_id="00000000
         except ValidationError as exc:
             missing.append(str(exc))
         out[profile] = {"profile": profile, "role": role, "configured": True, **capability,
-            "renderer_version": RENDERER_VERSION, "config_digest": digest(revision), "local_facts_digest": digest(facts),
+            "effective_backends": {s["id"]: {"address": backend_address(revision, s, profile), "ports": s["backend"]["ports"]} for s in revision["services"]},
+            "renderer_version": RENDERER_VERSION if revision["schema_version"] >= 3 else 1, "config_digest": digest(revision), "local_facts_digest": digest(facts),
             "pins": revision["pins"], "transport_port": revision["transport"]["port"],
             "transport_origin": "transport.port", "preparation_errors": missing,
             "files": files, "artifact_digest": digest(files),

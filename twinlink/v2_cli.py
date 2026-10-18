@@ -68,12 +68,14 @@ def register(commands, mutation_flags):
                     p.add_argument("--bind")
                     p.add_argument("--protocol", choices=("tcp", "udp"))
                     p.add_argument("--ports")
-                    p.add_argument("--backend-address")
+                    backend = p.add_mutually_exclusive_group()
+                    backend.add_argument("--backend-address")
+                    backend.add_argument("--backend-local", action="store_true", help="Target VPS2 itself using the selected profile's address")
                     p.add_argument("--backend-ports")
                     p.add_argument("--probe-request-hex")
                     p.add_argument("--probe-response-hex")
             if group == "config" and action == "set":
-                p.add_argument("field", choices=("transport.port", "gre.mtu", "gre.ttl", "gre.key", "public_endpoints.vps1", "public_endpoints.vps2"))
+                p.add_argument("field", choices=("transport.port", "gre.mtu", "gre.ttl", "gre.key", "gre.addresses", "gre.addresses.vps1", "gre.addresses.vps2", "public_endpoints.vps1", "public_endpoints.vps2"))
                 p.add_argument("value")
             if group == "config" and action == "migrate":
                 p.add_argument("--transport-port", type=int)
@@ -443,8 +445,9 @@ def handle(args, store, host, confirm):
     if group == "profile" and action == "check":
         target = None if args.profile == "off" else args.profile
         rt.ledger = Ownership(store, read_only=True)
-        rt.preflight(r, c["role"], target, c, {})
-        emit({"status": "ready-local", "peer": "unknown", "profile": target}, args)
+        readiness = rt.preflight(r, c["role"], target, c, {}) or {}
+        deferred = any(check["result"] == "deferred" for check in readiness.get("backend_checks", []))
+        emit({"status": "deferred-local" if deferred else "ready-local", "peer": "unknown", "profile": target, **readiness}, args)
         return 0
     if group == "profile" and action in ("switch", "restart", "reapply"):
         off = action == "switch" and args.profile == "off"
@@ -481,9 +484,14 @@ def handle(args, store, host, confirm):
             raise ValidationError("Shared edits must be authored on VPS1")
         changes = copy.deepcopy(r)
         if group == "config":
-            section, field = args.field.split(".")
-            value = args.value if section == "public_endpoints" else _integer(args.value, args.field, 1, 4294967295)
-            changes[section][field] = value
+            parts = args.field.split(".")
+            value = args.value if parts[0] == "public_endpoints" or "addresses" in parts else _integer(args.value, args.field, 1, 4294967295)
+            if args.field == "gre.addresses":
+                value = strict_json(args.value)
+            destination = changes
+            for part in parts[:-1]:
+                destination = destination[part]
+            destination[parts[-1]] = value
         else:
             entries = {s["id"]: s for s in changes["services"]}
             if action == "add" and args.name in entries or action != "add" and args.name not in entries:
@@ -492,13 +500,16 @@ def handle(args, store, host, confirm):
                 del entries[args.name]
             else:
                 s = entries.get(args.name, {"id": args.name, "bind": r["public_endpoints"]["vps1"], "protocol": "tcp", "ports": None,
-                                          "backend": {"address": "127.0.0.1", "ports": None}, "probe": None})
+                                          "backend": {"target": "vps2-local", "ports": None}, "probe": None})
                 for field in ("bind", "protocol", "ports"):
                     if getattr(args, field) is not None:
                         s[field] = getattr(args, field)
-                for field, arg in (("address", args.backend_address), ("ports", args.backend_ports)):
-                    if arg is not None:
-                        s["backend"][field] = arg
+                if args.backend_address is not None:
+                    s["backend"] = {"target": "address", "address": args.backend_address, "ports": s["backend"]["ports"]}
+                elif args.backend_local:
+                    s["backend"] = {"target": "vps2-local", "ports": s["backend"]["ports"]}
+                if args.backend_ports is not None:
+                    s["backend"]["ports"] = args.backend_ports
                 if args.probe_request_hex or args.probe_response_hex:
                     s["probe"] = {"kind": "exchange", "request_hex": args.probe_request_hex, "response_hex": args.probe_response_hex}
                 entries[args.name] = validate_service(s)
@@ -506,9 +517,10 @@ def handle(args, store, host, confirm):
         changes.pop("revision")
         changes.pop("parent_digest")
         updated = next_revision(r, **changes)
+        from .backends import effective
         other = [store.revision(p, cc["staged_revision"]) for p, cc in state["pairs"].items()]
         validate_reservations(updated, other)
-        emit({"status": "preview", "configuration": updated, "runtime": "Active revision retained until coordinated activation",
+        emit({"status": "preview", "configuration": updated, "effective_backends": effective(updated), "runtime": "Active revision retained until coordinated activation",
               "next": "One fresh pair export/import, config regenerate on both hosts, then profile switch"}, args)
         if commit(lambda: stage(updated, c["role"], creds, facts)):
             emit({"status": "complete", "staged_revision": updated["revision"], "active": c["active"]}, args)

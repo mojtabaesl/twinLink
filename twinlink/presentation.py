@@ -223,6 +223,10 @@ def render(value, context, phase=None, old=None, candidate=None, affected=None):
     if action == "export":
         return [style("Exported: " + value["exported"], "success"), "  Private transfer required. " + value["transfer"]]
     if action in ("install", "install-rathole"):
+        if group == "paqet":
+            return [style("Paqet installation: " + ("preview" if phase == "preview" else "already installed" if value.get("already_installed") else "completed")),
+                    "  " + str(value["path"]),
+                    "No changes applied. Repeat with --apply." if phase == "preview" else "  Activation remains unavailable pending runtime qualification."]
         return [style("Rathole installation: " + ("already installed" if value.get("already_installed") else "preview" if phase == "preview" else "completed")),
                 "  " + str(value.get("path", value.get("binary", ""))),
                 "No changes applied. Repeat with --apply." if phase == "preview" else "Next: run sudo twinlink forward setup."]

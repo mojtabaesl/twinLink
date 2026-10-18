@@ -19,21 +19,14 @@ import urllib.request
 
 from .contracts import PAQET_VERSION, PAQET_COMMIT
 from .models import ValidationError, _ipv4, _integer, ports
+from .backends import address as backend_address
 
 VERSION, COMMIT = PAQET_VERSION, PAQET_COMMIT
-# Do not populate these from a user's config or an unverified download.
-TRUSTED_BINARY_HASHES = {}
-QUALIFIED_PROTOCOLS = frozenset()
-# Installation pins are distinct from runtime qualification. Archive hashes
-# match GitHub asset digests; binary hashes were computed from the verified
-# archive members on 17 October 2026:
-# https://api.github.com/repos/hanselime/paqet/releases/tags/v1.0.0-alpha.21
-INSTALL_RELEASES = {
-    "amd64": {"archive_sha256": "4f2f69e0493746726598485ef18df43372470a1514f8021594137e522f0f4fc7",
-              "binary_sha256": "edb5d928443b3d47e5c7c86ae394dbac117826e7ddb7c27355fbd2cdd9ee1791"},
-    "arm64": {"archive_sha256": "be5c7b35a0a93832063e1dc7fddeb76d4597fb9de76abdfdf7b8574b775e3885",
-              "binary_sha256": "f6db279a57a772a250efffe4bb0a79b112495331568ccc0f6e5f4398bbe962e3"},
-}
+from .paqet_release import RELEASE_MANIFEST
+
+# One reviewed identity manifest is shared by installation and preparation.
+INSTALL_RELEASES = RELEASE_MANIFEST["architectures"]
+SUPPORTED_PROTOCOLS = frozenset(("tcp", "udp"))
 INSTALL_ARCHITECTURES = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 MAX_INSTALL_BYTES = 32 * 1024 * 1024
 SYSTEM_REQUIREMENTS = ("Linux root/CAP_NET_RAW and packet capture permissions", "libpcap for dynamically linked builds",
@@ -82,7 +75,7 @@ def render_config(revision, role, facts, key):
             c, d = ports(s["backend"]["ports"])
             for offset in range(b - a + 1):
                 config["forward"].append({"listen": f"{s['bind']}:{a + offset}",
-                    "target": f"{s['backend']['address']}:{c + (offset if c != d else 0)}", "protocol": s["protocol"]})
+                    "target": f"{backend_address(revision, s, 'direct-paqet')}:{c + (offset if c != d else 0)}", "protocol": s["protocol"]})
     else:
         low, high = facts["ephemeral_range"]
         if low <= port <= high:
@@ -124,11 +117,51 @@ def packet_exceptions(revision, facts, table, owner):
 '''
 
 
+def architecture_name(architecture):
+    return INSTALL_ARCHITECTURES.get(architecture.lower())
+
+
 def binary_pin(architecture):
-    checksum = TRUSTED_BINARY_HASHES.get(architecture)
-    if not checksum:
-        raise ValidationError("No verified Paqet binary hash for this architecture; profile remains unavailable")
-    return {"version": VERSION, "commit": COMMIT, "sha256": checksum}
+    architecture = architecture_name(architecture)
+    pin = INSTALL_RELEASES.get(architecture)
+    if not pin:
+        raise ValidationError("Untrusted Paqet binary architecture; verified Linux amd64/arm64 identity required")
+    return {"version": VERSION, "commit": COMMIT, "architecture": architecture, "sha256": pin["binary_sha256"]}
+
+
+def qualification(revision, architecture=None):
+    """Only reviewed evidence for this renderer, settings and architecture counts."""
+    from .contracts import digest
+    architecture = architecture_name(architecture or platform.machine())
+    matrix = RELEASE_MANIFEST["qualification"].get(architecture, {})
+    mapping_features = set()
+    intents = {s["backend"].get("target", "address") for s in revision["services"]}
+    if len({s["protocol"] for s in revision["services"]}) > 1:
+        mapping_features.add("mixed-protocols")
+        tcp = {port for s in revision["services"] if s["protocol"] == "tcp" for port in range(ports(s["ports"])[0], ports(s["ports"])[1] + 1)}
+        udp = {port for s in revision["services"] if s["protocol"] == "udp" for port in range(ports(s["ports"])[0], ports(s["ports"])[1] + 1)}
+        if tcp & udp:
+            mapping_features.add("shared-numeric-ports")
+    for service in revision["services"]:
+        first, last = ports(service["ports"])
+        if last > first:
+            mapping_features.add("ranges")
+            if len(set(ports(service["backend"]["ports"]))) == 1:
+                mapping_features.add("many-to-one")
+    count = sum(ports(s["ports"])[1] - ports(s["ports"])[0] + 1 for s in revision["services"])
+    reasons = []
+    for protocol in sorted({s["protocol"] for s in revision["services"]}):
+        evidence = matrix.get(protocol, {})
+        if protocol not in SUPPORTED_PROTOCOLS:
+            reasons.append("Unsupported Paqet mapping protocol: " + protocol)
+        elif (not evidence.get("evidence") or evidence.get("binary_sha256") != INSTALL_RELEASES.get(architecture, {}).get("binary_sha256")
+              or evidence.get("renderer_version") != (2 if revision["schema_version"] >= 3 else 1)
+              or digest(revision["profiles"]["direct-paqet"]) not in evidence.get("settings_digests", [])
+              or not mapping_features <= set(evidence.get("mapping_features", []))
+              or not intents <= set(evidence.get("backend_intents", []))
+              or count > evidence.get("max_expanded_services", 0)):
+            reasons.append("Paqet " + protocol.upper() + " integration unqualified for Linux " + str(architecture or "unsupported architecture") + "; pinned-version packet qualification required")
+    return reasons
 
 
 def check_installed_version(binary):
@@ -164,7 +197,7 @@ def install_plan(binary, sha256=None):
     return {"path": str(path), "version": VERSION, "commit": COMMIT, "architecture": architecture,
             "url": f"https://github.com/hanselime/paqet/releases/download/{VERSION}/{asset}",
             **pin, "binary_member": "paqet_linux_" + architecture, "already_installed": observed is not None,
-            "activation": "unavailable pending runtime binary and protocol qualification"}
+            "activation": "unavailable pending protocol and host qualification"}
 
 
 def _install_payload(archive, plan):

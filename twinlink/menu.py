@@ -573,13 +573,19 @@ def run_v2_menu(args, command_runner=None, input_fn=None, output_fn=None):
                 if name in ("add", "edit"):
                     for flag, label, default in (("--bind", "VPS1 service bind", "0.0.0.0"),
                             ("--protocol", "Protocol", "tcp"), ("--ports", "Public port/range", None),
-                            ("--backend-address", "Backend IPv4", "127.0.0.1"), ("--backend-ports", "Backend port/range", None),
+                            ("--backend-ports", "Backend port/range", None),
                             ("--probe-request-hex", "Safe application request hex (optional)", None),
                             ("--probe-response-hex", "Expected response hex (optional)", None)):
                         value = menu.prompt(label, default=default if name == "add" else None,
                                             required=name == "add" and "probe" not in flag)
                         if value:
                             command += [flag, value]
+                    backend = menu.choice("Backend target", (("1", "VPS2 itself"), ("2", "Explicit IPv4")) if name == "add" else
+                                          (("0", "Keep current target"), ("1", "VPS2 itself"), ("2", "Explicit IPv4")), default="1" if name == "add" else "0")
+                    if backend == "1":
+                        command += ["--backend-local"]
+                    elif backend == "2":
+                        command += ["--backend-address", menu.prompt("Backend IPv4", required=True)]
                 menu.execute(command, mutation=name != "list")
             elif choice == "3":
                 action = menu.choice("Profiles", (("1", "List"), ("2", "Check local preparation"),

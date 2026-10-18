@@ -29,7 +29,10 @@ class SystemHost:
     def run(self, argv, check=True, input=None, timeout=15):
         self.commands.append(list(argv))
         out, err, code = "", "", 0
-        if argv[:3] == ["nft", "-j", "list"]:
+        if argv[:4] == ["ip", "-j", "route", "get"]:
+            found = [row for row in self.route_rows if row.get("dst") != "default" and ipaddress.IPv4Address(argv[4]) in ipaddress.IPv4Network(row["dst"])]
+            out = json.dumps(found[:1])
+        elif argv[:3] == ["nft", "-j", "list"]:
             if argv[-1] in self.tables:
                 out = json.dumps(self.tables[argv[-1]])
             else:
@@ -67,9 +70,12 @@ class SystemHost:
             address = ipaddress.IPv4Interface(argv[3])
             self.addr_rows = [r for r in self.addr_rows if r["ifname"] != argv[-1]]
             self.addr_rows.append({"ifname": argv[-1], "addr_info": [{"family": "inet", "local": str(address.ip), "prefixlen": address.network.prefixlen}]})
+            self.route_rows = [r for r in self.route_rows if r.get("dev") != argv[-1]]
+            self.route_rows.append({"dst": str(address.network), "dev": argv[-1], "protocol": "kernel"})
         elif argv[:3] == ["ip", "link", "delete"]:
             self.link_rows = [r for r in self.link_rows if r["ifname"] != argv[-1]]
             self.addr_rows = [r for r in self.addr_rows if r["ifname"] != argv[-1]]
+            self.route_rows = [r for r in self.route_rows if r.get("dev") != argv[-1]]
         elif argv[0] == "sysctl":
             if argv[1] == "-w":
                 self.forwarding = argv[-1].split("=")[-1]
