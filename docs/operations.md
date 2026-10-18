@@ -383,3 +383,44 @@ services needed by managed records. Use the v2 `uninstall --purge` flow above fo
 full local cleanup. Separately installed Rathole binaries and exported files
 outside TwinLink storage remain operator-owned. Local cleanup never claims that
 the peer is clean.
+
+### Legacy baseline backups
+
+An early resume implementation and the earlier manual recovery command wrote
+`baseline.json.backup-NANOSECONDS` inside `/var/lib/twinlink`. The current
+installer writes `.twinlink-baseline-STATEHASH.backup-NANOSECONDS.json` beside
+the state directory, normally under `/var/lib`, and keeps it after uninstall.
+Purging does not silently adopt or delete an untracked historical snapshot.
+
+If a legacy backup blocks purge, preview its preservation, apply, then retry:
+
+```sh
+sudo twinlink system preserve-backups
+sudo twinlink system preserve-backups --apply --yes
+sudo twinlink uninstall --purge --apply --yes
+```
+
+If the installed runtime predates this recovery command, run it from an updated
+checkout without reinstalling or editing the backup:
+
+```sh
+cd ~/twinLink
+sudo python3 -m twinlink system preserve-backups
+sudo python3 -m twinlink system preserve-backups --apply --yes
+sudo twinlink uninstall --purge --apply --yes
+```
+
+Use the same `--state-dir` before the command group for a non-default install.
+The command accepts only direct legacy leaf names ending in a 19-digit
+nanosecond timestamp. Each must be a regular root-owned mode-0600 bounded JSON
+baseline with the same installation identity and original facts as the current
+baseline. Malformed names/JSON, unrelated snapshots, symlinks and unsafe modes
+are refused. Unknown private files still block uninstall; changed program and
+owned resource fingerprints remain conflicts.
+
+Preservation writes and syncs a private copy outside the state directory before
+unlinking the original, preserving its exact bytes and mode. It never overwrites
+an existing different copy. An identical copy can complete an interrupted retry.
+The result prints retained paths and SHA256 digests. Uninstall leaves these
+external copies intact. Legacy backups have no recorded historical digest, so
+preservation treats them as data, never as authority for package/resource restore.

@@ -117,6 +117,7 @@ active one. `service list` and `config show` describe staged settings.
 | `config show --pair ID` | Inspect canonical shared settings. |
 | `config set FIELD VALUE --pair ID` | Stage a shared field change. |
 | `config regenerate --pair ID` | Refresh local facts/configs, pin binaries and prepare guarded units. Does not start traffic. |
+| `system preserve-backups` | Preview preservation of validated legacy baseline snapshots outside the state directory; add `--apply --yes` to execute. See [backup recovery](operations.md#legacy-baseline-backups). |
 
 | Service option | Meaning |
 | --- | --- |

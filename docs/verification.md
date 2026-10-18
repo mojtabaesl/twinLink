@@ -10,12 +10,13 @@ Linux networking, systemd behavior or real VPS delivery.
 
 | Check | Result |
 | --- | --- |
-| Full suite | **557 tests: 542 passed, 15 skipped**, 24.299 seconds. |
+| Full suite | **567 tests: 552 passed, 15 skipped**, 24.645 seconds. |
 | Backend/installer tests from a built zipapp | **42 passed**; both new implementation modules loaded from the archive. |
-| Python 3.9 grammar | All 58 application/test/script files parsed. |
+| Legacy baseline preservation from a built zipapp | **10 passed**; preservation implementation loaded from the archive. |
+| Python 3.9 grammar | All 60 application/test/script files parsed. |
 | Packaging/help | Zipapp build, version, service add `--backend-local`, and qualification-runner help passed. |
 | Shell and whitespace | Install/uninstall shell syntax and `git diff --check` passed. |
-| Documentation | **37** local links/anchors, **35** shell blocks and **54** CLI examples passed. |
+| Documentation | **39** local links/anchors, **37** shell blocks and **58** CLI examples passed. |
 
 Focused coverage includes omitted/explicit/reset/edit-preserved backend intent,
 menu defaults, schema-2 unchanged canonical bytes and bundle digest, schema-3
@@ -40,6 +41,15 @@ The portable suite retains ownership/recovery/expiry, nft comment compatibility,
 report bounds/redaction, installer and uninstall interruption regressions.
 Positive simulated probes and injected qualification records are unit fixtures;
 they never update or qualify the shipped release manifest.
+
+Legacy baseline preservation tests reproduce the observed
+`baseline.json.backup-1792311731993531669` location and verify a read-only preview,
+root/private file requirements, immutable original-facts matching, byte-for-byte
+external preservation, interrupted retry, large package inventories, normalized
+state paths and successful full CLI uninstall afterward. Malformed JSON/names,
+symlinks, unrelated snapshots, changed destinations/sources and unknown private
+artifacts remain rejected. Modified program files still block removal. This is
+data preservation, not historical authentication or adoption as restore proof.
 
 ## Native candidate harness and CI
 
@@ -69,10 +79,10 @@ Paths below are repository-relative; application modules are under `twinlink/`.
 | Area | Files |
 | --- | --- |
 | Backend contract and rendering | `backends.py`, `contracts.py`, `profiles.py`, `render.py`, `host.py` |
-| Interface and lifecycle | `v2_cli.py`, `menu.py`, `profile_runtime.py`, `coordination.py` |
+| Interface and lifecycle | `cli.py`, `v2_cli.py`, `menu.py`, `profile_runtime.py`, `coordination.py`, `cleanup.py`, `baseline_backups.py` |
 | Paqet identity and diagnostics | `paqet.py`, `paqet_release.py`, `diagnostics.py`, `redaction.py` |
 | Native harness and CI | `scripts/qualify_paqet.py`, `.github/workflows/linux-integration.yml`, `tests/integration/test_netns.py` |
-| Portable tests and schema fixtures | `tests/test_backends.py`, `tests/test_native_qualification.py`, `tests/test_nft_guard_review.py`, `tests/test_paqet_install.py`, `tests/test_profile_runtime.py`, `tests/test_review_regressions.py`, `tests/test_safety_review.py` |
+| Portable tests and schema fixtures | `tests/test_backends.py`, `tests/test_native_qualification.py`, `tests/test_baseline_backups.py`, `tests/test_nft_guard_review.py`, `tests/test_paqet_install.py`, `tests/test_profile_runtime.py`, `tests/test_review_regressions.py`, `tests/test_safety_review.py` |
 | Documentation | `README.md`, `docs/commands.md`, `docs/architecture.md`, `docs/operations.md`, `docs/verification.md`, `docs/paqet-qualification.md`, `v2-operations.md` |
 
 Earlier uncommitted Paqet output changes in `cli.py`, `presentation.py` and

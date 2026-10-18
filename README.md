@@ -68,6 +68,10 @@ sudo scripts/install.sh --resume
 Resume saves a private baseline backup and retains the original package
 snapshots. Backups are stored beside the state directory (by default,
 `/var/lib/.twinlink-baseline-*.backup-*.json`) and retained after uninstall.
+An older recovery command or installer may have left `baseline.json.backup-*`
+inside the state directory. Use `sudo twinlink system preserve-backups --apply
+--yes` to preserve a recognized private snapshot outside it before purge;
+see [backup recovery](docs/operations.md#legacy-baseline-backups).
 Program writes are recorded before publication, so resume can complete a
 partially written launcher/runtime without accepting modified program files.
 Older interrupted installations without that proof require manual recovery.

@@ -41,11 +41,11 @@ def register(commands, mutation_flags):
                            ("profile", ("list", "check", "switch", "status", "restart", "reapply")),
                            ("service", ("list", "add", "edit", "delete")),
                            ("config", ("show", "set", "regenerate", "migrate")),
-                           ("system", ("changes", "restore"))):
+                           ("system", ("changes", "restore", "preserve-backups"))):
         parent = commands.add_parser(group)
         subs = parent.add_subparsers(dest="action", required=True)
         for action in actions:
-            mutate = action in ("import", "delete", "switch", "restart", "reapply", "add", "edit", "set", "regenerate", "migrate", "restore")
+            mutate = action in ("import", "delete", "switch", "restart", "reapply", "add", "edit", "set", "regenerate", "migrate", "restore", "preserve-backups")
             p = leaf(subs, action, mutate)
             if group == "pair" and action == "export":
                 p.add_argument("--output")
@@ -305,11 +305,21 @@ def handle(args, store, host, confirm):
             emit({"status": "complete", "pair_id": r["pair_id"], "runtime": "unchanged", "next": "config regenerate --pair " + r["pair_id"]}, args)
         return 0
     if group == "system":
+        if action == "preserve-backups":
+            from .baseline_backups import plan, preserve
+            emit({"status": "preview", "baseline_backups": plan(store),
+                  "policy": "Preserve exact contents outside the state directory; purge never deletes retained copies"}, args)
+            result = commit(lambda: preserve(store))
+            if result is not None:
+                emit(result, args)
+            return 0
         summary = Ownership(store).summary()
         baseline_path = store.directory / "baseline.json"
         reject_symlink(baseline_path)
         baseline = store.baseline() if baseline_path.exists() else {}
+        legacy_backups = [str(path) for path in sorted(store.directory.glob("baseline.json.backup-*"))]
         emit({"status": "preview" if action == "restore" else "complete", "resources": summary,
+              **({"legacy_baseline_backups": legacy_backups, "baseline_backup_recovery": "twinlink system preserve-backups --apply --yes (use the same --state-dir)"} if legacy_backups else {}),
               "historical_baseline": baseline.get("historical_baseline", "unknown"),
               "package_delta": baseline.get("package_delta", {}), "python": baseline.get("python", "unknown")}, args)
         if action == "restore" and applying:
@@ -329,6 +339,8 @@ def handle(args, store, host, confirm):
         from .cleanup import delete_pair, restore_system, remove_program
         pending = [p for p, cc in state["pairs"].items() if cc["active"] or cc["transition"] or cc.get("commit_pending")]
         emit({"status": "preview", "pairs": list(state["pairs"]), "requires_off": pending,
+              "legacy_baseline_backups": [str(path) for path in sorted(store.directory.glob("baseline.json.backup-*"))],
+              "baseline_backup_recovery": "twinlink system preserve-backups --apply --yes (use the same --state-dir)",
               "resources": Ownership(store).summary(), "next": "Complete profile switch off on both hosts; then uninstall --purge --apply --yes",
               "scope": "Local cleanup only; peer must be cleaned separately"}, args)
         purging = args.purge or args.purge_managed

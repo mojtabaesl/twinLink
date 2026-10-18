@@ -193,6 +193,9 @@ def remove_program(store, runtime):
     for path in store.directory.rglob("*"):
         reject_symlink(path)
         if path.is_file() and str(path) not in records and path != journal:
+            if path.parent == store.directory and path.name.startswith("baseline.json.backup-"):
+                raise StateError("Legacy baseline backup retained: " + str(path) +
+                    "; run twinlink system preserve-backups --apply --yes using the same --state-dir, then retry uninstall. Contents are preserved outside the state directory")
             raise StateError("Unresolved private artifact retained with runtime: " + str(path))
     if not journal.exists():
         content = canonical(checkpoint)

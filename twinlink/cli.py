@@ -200,7 +200,8 @@ def build_parser():
     recover.add_argument("--transaction")
     recover.add_argument("--refresh-receipt", action="store_true")
     mutation_flags(recover)
-    uninstall = commands.add_parser("uninstall", help="Preview resource removal; program-only removal is scripts/uninstall.sh")
+    uninstall = commands.add_parser("uninstall", help="Preview resource removal; program-only removal is scripts/uninstall.sh",
+        epilog="Legacy baseline backup blocks purge? Run twinlink system preserve-backups --apply --yes with the same --state-dir, then retry uninstall.")
     uninstall.add_argument("--pair")
     uninstall.add_argument("--plan", action="store_true")
     uninstall.add_argument("--purge", action="store_true")
