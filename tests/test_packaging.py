@@ -123,6 +123,185 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(packaging.installer_baseline(args, prefix, None), baseline)
         self.assertEqual((Path(args.state_dir) / "baseline.json").stat().st_mode & 0o777, 0o600)
 
+    def test_apt_new_install_architecture_is_not_an_upgrade(self):
+        for output, blocked in (
+            ("Inst conntrack (1.4.8 Ubuntu:24.04/noble [amd64])\n", False),
+            ("Inst libnetfilter-conntrack3 [1.0.9-1] (1.0.9-2 Ubuntu [amd64])\n", True),
+            ("Remv foreign-package [1.0]\n", True),
+            ("Purg foreign-package [1.0]\n", True),
+        ):
+            with self.subTest(output=output), \
+                 mock.patch.object(packaging.sys, "platform", "linux"), \
+                 mock.patch.object(Path, "is_dir", return_value=True), \
+                 mock.patch.object(Path, "read_text", return_value='ID="ubuntu"\n'), \
+                 mock.patch.object(packaging, "installed_packages", return_value={}), \
+                 mock.patch.object(packaging.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(packaging, "run") as run, \
+                 mock.patch.object(packaging.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
+                if blocked:
+                    with self.assertRaisesRegex(RuntimeError, "--resume --skip-deps"):
+                        packaging.distro_dependencies()
+                    self.assertEqual(run.call_count, 1)  # Only apt update; no package changes.
+                else:
+                    packaging.distro_dependencies()
+                    self.assertEqual(run.call_count, 2)
+
+    def test_resume_preserves_snapshot_and_completes_installation(self):
+        args = argparse.Namespace(prefix=str(self.root / "prefix"), state_dir=str(self.root / "state"),
+                                  build_only=None, rathole=None, rathole_sha256=None,
+                                  skip_deps=True, resume=False)
+        with mock.patch.object(packaging, "installed_packages", return_value={"original": "1"}):
+            baseline = packaging.installer_baseline(args, Path(args.prefix), None)
+        baseline["operations"].append({"operation": "install", "status": "pending",
+                                       "packages_before": {"original": "1"}})
+        baseline_path = Path(args.state_dir) / "baseline.json"
+        packaging.write_baseline(baseline_path, baseline)
+        original = baseline_path.read_bytes()
+        def build(path):
+            packaging.write_owned(path, "test runtime", 0o755)
+        with mock.patch.object(packaging.os, "geteuid", return_value=0), \
+             mock.patch.object(packaging, "installed_packages", return_value={"original": "1", "uncertain": "2"}), \
+             mock.patch.object(packaging, "distro_dependencies", return_value=[]), \
+             mock.patch.object(packaging, "build", side_effect=build), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "--resume"):
+                packaging.install(args)
+            self.assertEqual(baseline_path.read_bytes(), original)
+            args.resume = True
+            packaging.install(args)
+        result = packaging.parse_baseline(baseline_path.read_bytes())
+        self.assertEqual(result["packages_before"], {"original": "1"})
+        self.assertEqual(result["package_delta"], {})
+        self.assertEqual(result["operations"][0]["packages_before"], {"original": "1"})
+        self.assertEqual([op["status"] for op in result["operations"]], ["interrupted", "complete"])
+        backup, = Path(args.state_dir).parent.glob(".twinlink-baseline-*.backup-*.json")
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(packaging.manifest_paths(Path(args.prefix))[0].exists())
+        from twinlink.store import Store
+        from twinlink.contracts import empty_v2
+        from twinlink.cleanup import remove_program
+        from types import SimpleNamespace
+        store = Store(args.state_dir)
+        store.write(empty_v2())
+        runtime = packaging.manifest_paths(Path(args.prefix))[1]
+        self.assertEqual(remove_program(store, SimpleNamespace(executable=str(runtime)))["status"], "complete")
+        self.assertFalse(runtime.exists())
+        self.assertTrue(backup.exists())
+
+    def test_resume_partial_program_publication_and_reject_foreign_edits(self):
+        for stop_after in ("twinlink-runtime", "twinlink", "twinlink-install.json"):
+            for modified in (False, True):
+                with self.subTest(stop_after=stop_after, modified=modified):
+                    root = self.root / (stop_after + str(modified))
+                    root.mkdir()
+                    args = argparse.Namespace(prefix=str(root / "prefix"), state_dir=str(root / "state"),
+                                              build_only=None, rathole=None, rathole_sha256=None,
+                                              skip_deps=True, resume=False)
+                    replace = packaging.os.replace
+                    def interrupted_replace(source, target):
+                        replace(source, target)
+                        if Path(target).name == stop_after:
+                            raise KeyboardInterrupt()
+                    with mock.patch.object(packaging.os, "geteuid", return_value=0), \
+                         mock.patch.object(packaging, "installed_packages", return_value={}), \
+                         mock.patch.object(packaging, "distro_dependencies", return_value=[]), \
+                         mock.patch.object(packaging, "build", side_effect=lambda path: packaging.write_owned(path, "runtime", 0o755)), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        with mock.patch.object(packaging.os, "replace", side_effect=interrupted_replace):
+                            with self.assertRaises(KeyboardInterrupt):
+                                packaging.install(args)
+                        runtime = packaging.manifest_paths(Path(args.prefix))[1]
+                        if modified:
+                            runtime.write_text("foreign modification")
+                        args.resume = True
+                        if modified:
+                            with self.assertRaisesRegex(RuntimeError, "differs"):
+                                packaging.install(args)
+                            self.assertEqual(runtime.read_text(), "foreign modification")
+                        else:
+                            # A second dependency failure must not lose proof for the
+                            # already-published files from the first attempt.
+                            with mock.patch.object(packaging, "distro_dependencies", side_effect=RuntimeError("dependency failure")):
+                                with self.assertRaisesRegex(RuntimeError, "dependency failure"):
+                                    packaging.install(args)
+                            packaging.install(args)
+                            self.assertIsNotNone(packaging.read_manifest(Path(args.prefix)))
+                            baseline = packaging.parse_baseline((Path(args.state_dir) / "baseline.json").read_bytes())
+                            self.assertEqual(baseline["operations"][-1]["status"], "complete")
+
+    def test_resume_checkpoint_keeps_proof_before_and_after_atomic_replace(self):
+        for after_replace in (False, True):
+            with self.subTest(after_replace=after_replace):
+                root = self.root / str(after_replace)
+                root.mkdir()
+                args = argparse.Namespace(prefix=str(root / "prefix"), state_dir=str(root / "state"),
+                                          build_only=None, rathole=None, rathole_sha256=None,
+                                          skip_deps=True, resume=False)
+                baseline_path = Path(args.state_dir) / "baseline.json"
+                runtime = packaging.manifest_paths(Path(args.prefix))[1]
+                replace = packaging.os.replace
+                def stop_publication(source, target):
+                    replace(source, target)
+                    if Path(target) == runtime:
+                        raise KeyboardInterrupt()
+                def stop_checkpoint(source, target):
+                    if Path(target) == baseline_path:
+                        if after_replace:
+                            replace(source, target)
+                        raise KeyboardInterrupt()
+                    replace(source, target)
+                with mock.patch.object(packaging.os, "geteuid", return_value=0), \
+                     mock.patch.object(packaging, "installed_packages", return_value={"original": "1"}), \
+                     mock.patch.object(packaging, "distro_dependencies", return_value=[]), \
+                     mock.patch.object(packaging, "build", side_effect=lambda path: packaging.write_owned(path, "runtime", 0o755)), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with mock.patch.object(packaging.os, "replace", side_effect=stop_publication), self.assertRaises(KeyboardInterrupt):
+                        packaging.install(args)
+                    original = packaging.parse_baseline(baseline_path.read_bytes())
+                    proof = original["operations"][-1]["program_writes"]
+                    args.resume = True
+                    with mock.patch.object(packaging.os, "replace", side_effect=stop_checkpoint), self.assertRaises(KeyboardInterrupt):
+                        packaging.install(args)
+                    checkpoint = packaging.parse_baseline(baseline_path.read_bytes())
+                    pending = [op for op in checkpoint["operations"] if op["status"] == "pending"]
+                    self.assertEqual(len(pending), 1)
+                    self.assertEqual(pending[0]["program_writes"], proof)
+                    self.assertEqual(checkpoint["packages_before"], original["packages_before"])
+                    self.assertEqual(len(checkpoint["operations"]), 2 if after_replace else 1)
+                    packaging.install(args)
+                    self.assertIsNotNone(packaging.read_manifest(Path(args.prefix)))
+                    final = packaging.parse_baseline(baseline_path.read_bytes())
+                    self.assertEqual(final["operations"][-1]["status"], "complete")
+
+    def test_resume_does_not_adopt_unproven_partial_runtime(self):
+        args = argparse.Namespace(prefix=str(self.root / "prefix"), state_dir=str(self.root / "state"),
+                                  build_only=None, rathole=None, rathole_sha256=None,
+                                  skip_deps=True, resume=True)
+        with mock.patch.object(packaging, "installed_packages", return_value={}):
+            baseline = packaging.installer_baseline(args, Path(args.prefix), None)
+        baseline["operations"].append({"operation": "install", "status": "pending"})
+        packaging.write_baseline(Path(args.state_dir) / "baseline.json", baseline)
+        runtime = packaging.manifest_paths(Path(args.prefix))[1]
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("unproven runtime")
+        with mock.patch.object(packaging.os, "geteuid", return_value=0), self.assertRaisesRegex(RuntimeError, "no durable ownership proof"):
+            packaging.install(args)
+        self.assertEqual(runtime.read_text(), "unproven runtime")
+
+    def test_resume_refuses_pending_package_restoration(self):
+        args = argparse.Namespace(prefix=str(self.root / "prefix"), state_dir=str(self.root / "state"),
+                                  build_only=None, rathole=None, rathole_sha256=None,
+                                  skip_deps=True, resume=True)
+        with mock.patch.object(packaging, "installed_packages", return_value={}):
+            baseline = packaging.installer_baseline(args, Path(args.prefix), None)
+        baseline["operations"].append({"operation": "restore-packages", "status": "pending"})
+        path = Path(args.state_dir) / "baseline.json"
+        packaging.write_baseline(path, baseline)
+        original = path.read_bytes()
+        with mock.patch.object(packaging.os, "geteuid", return_value=0), self.assertRaisesRegex(RuntimeError, "non-install"):
+            packaging.install(args)
+        self.assertEqual(path.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

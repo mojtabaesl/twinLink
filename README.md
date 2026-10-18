@@ -57,6 +57,33 @@ sudo twinlink rathole install --apply --yes
 twinlink --version
 ```
 
+If an earlier installation failed or was interrupted, update the checkout and
+resume from it. This works even when `twinlink` is not installed yet:
+
+```sh
+git pull --ff-only
+sudo scripts/install.sh --resume
+```
+
+Resume saves a private baseline backup and retains the original package
+snapshots. Backups are stored beside the state directory (by default,
+`/var/lib/.twinlink-baseline-*.backup-*.json`) and retained after uninstall.
+Program writes are recorded before publication, so resume can complete a
+partially written launcher/runtime without accepting modified program files.
+Older interrupted installations without that proof require manual recovery.
+Resume does not claim package changes from the interrupted attempt;
+those packages may need manual removal after uninstall. Do not delete
+`/var/lib/twinlink/baseline.json`.
+
+If Ubuntu/Debian reports that dependencies require upgrades, install the
+prerequisites explicitly, then resume without automatic package changes:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends iproute2 nftables iputils-ping conntrack
+sudo scripts/install.sh --resume --skip-deps
+```
+
 The Rathole bootstrap command downloads the pinned 0.5.0 release on Linux
 x86_64/ARM64, or validates an executable already at `/usr/local/bin/rathole`.
 It is available before pair setup/import. For a kernel-only setup, skip that

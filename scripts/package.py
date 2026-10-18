@@ -115,6 +115,34 @@ def read_manifest(prefix, required=False):
     return manifest
 
 
+def program_value(path):
+    reject_symlinks(path)
+    if not path.exists():
+        return None
+    if not path.is_file():
+        fail("Program path is not a regular file: " + str(path))
+    return {"sha256": sha256(path), "mode": stat.S_IMODE(path.stat().st_mode)}
+
+
+def recover_program_writes(args, prefix):
+    """Authorize partial writes only from durable before/after fingerprints."""
+    path = Path(args.state_dir).absolute() / "baseline.json"
+    reject_symlinks(path)
+    if not path.is_file() or path.stat().st_mode & 0o077:
+        fail("Private installer baseline required to resume program writes")
+    baseline = parse_baseline(path.read_bytes())
+    pending = [op for op in baseline.get("operations", []) if op.get("status") == "pending"]
+    proof = pending[-1].get("program_writes", {}) if pending else {}
+    paths = manifest_paths(prefix)
+    if set(proof) != {str(p) for p in paths}:
+        fail("Interrupted program files have no durable ownership proof; refusing to replace them")
+    for target in paths:
+        row = proof[str(target)]
+        if program_value(target) not in (row["before"], row["after"]):
+            fail("Program file differs from recorded installer intent: " + str(target))
+    return {"owner": "twinlink", "version": 1}  # Existing installation provenance.
+
+
 def distro_dependencies(skip=False):
     if sys.platform != "linux":
         fail("Installation requires Linux; use --build-only PATH to build a portable archive")
@@ -141,8 +169,13 @@ def distro_dependencies(skip=False):
             install_command = ["apt-get", "install", "--no-upgrade", "--no-install-recommends", "-y", *missing_packages]
             if not skip:
                 simulation = subprocess.run(["apt-get", "--simulate", *install_command[1:]], capture_output=True, text=True, check=True)
-                if any(line.startswith(("Remv ", "Purg ")) or line.startswith("Inst ") and "[" in line for line in simulation.stdout.splitlines()):
-                    fail("Dependency simulation would upgrade/remove pre-existing packages; install prerequisites separately")
+                # New installs also contain architecture brackets, e.g. (... [amd64]).
+                # Only a version immediately after the package name denotes an upgrade.
+                if any(line.startswith(("Remv ", "Purg ")) or re.match(r"^Inst \S+ \[", line) for line in simulation.stdout.splitlines()):
+                    fail("Dependency simulation would upgrade/remove pre-existing packages. "
+                         "Install prerequisites explicitly:\n"
+                         "  sudo apt-get install --no-install-recommends iproute2 nftables iputils-ping conntrack\n"
+                         "Then retry your install command with --resume --skip-deps")
             commands.append(install_command)
     elif distro in {"fedora", "rocky", "almalinux", "rhel"}:
         existing = installed_packages()
@@ -255,13 +288,38 @@ def install(args):
         fail("Run installation as root (sudo scripts/install.sh)")
     prefix = Path(args.prefix).absolute()
     rathole = validate_install_options(args, prefix)
-    previous = read_manifest(prefix)
+    try:
+        previous = read_manifest(prefix)
+    except RuntimeError:
+        if not getattr(args, "resume", False):
+            raise
+        previous = recover_program_writes(args, prefix)
     baseline = installer_baseline(args, prefix, previous)
-    if any(operation.get("status") == "pending" for operation in baseline.get("operations", [])):
-        fail("Interrupted installer operation in baseline.json; preserve its package snapshot and resolve provenance before retrying")
     baseline_path = Path(args.state_dir).absolute() / "baseline.json"
+    pending = [operation for operation in baseline.get("operations", []) if operation.get("status") == "pending"]
+    program_proof = pending[-1].get("program_writes") if pending else None
+    if pending:
+        if not getattr(args, "resume", False):
+            fail("Interrupted installer operation in baseline.json. Retry your install command with --resume; "
+                 "the original baseline and package snapshots will be preserved")
+        if any(operation.get("operation") != "install" for operation in pending):
+            fail("Cannot resume a pending non-install operation; complete its recovery first")
+        # Keep recovery copies outside the directory that full uninstall purges.
+        backup = baseline_path.parent.parent / (".twinlink-baseline-" +
+            hashlib.sha256(str(baseline_path.parent).encode()).hexdigest()[:16] +
+            ".backup-" + str(time.time_ns()) + ".json")
+        write_owned(backup, serialize_baseline(baseline), 0o600)
+        for operation in pending:
+            operation["status"] = "interrupted"
     baseline["operations"].append({"operation": "install", "status": "pending", "time": time.time()})
+    if program_proof:
+        baseline["operations"][-1]["program_writes"] = program_proof
+    # Retire the previous intent and publish its replacement in one atomic
+    # write, so every durable state retains pending program ownership proof.
     write_baseline(baseline_path, baseline)
+    if pending:
+        print("Resuming installation; original baseline saved to " + str(backup))
+        print("Package changes from interrupted attempts remain unclaimed and may require manual removal at uninstall.")
     operation_before = installed_packages()
     baseline["operations"][-1]["packages_before"] = operation_before
     write_baseline(baseline_path, baseline)
@@ -275,12 +333,34 @@ def install(args):
     for directory in (launcher.parent, runtime.parent):
         reject_symlinks(directory)
         directory.mkdir(parents=True, exist_ok=True, mode=0o755)
-    build(runtime)
     content = "#!/usr/bin/env python3\n" + LAUNCHER_MARKER + "\nimport os, sys\n"
     content += "os.execv(" + repr(str(runtime)) + ", [" + repr(str(runtime)) + ", '--runtime-path', " + repr(str(runtime)) + ", *sys.argv[1:]])\n"
-    write_owned(launcher, content, 0o755)
-    manifest = {"owner": "twinlink", "version": 1, "files": {str(path): sha256(path) for path in (launcher, runtime)}}
-    write_owned(manifest_path, json.dumps(manifest, indent=2) + "\n", 0o644)
+    with tempfile.TemporaryDirectory(prefix="twinlink-install-") as directory:
+        staged = Path(directory).resolve() / "runtime"
+        build(staged)
+        runtime_content = staged.read_bytes()
+        manifest = {"owner": "twinlink", "version": 1, "files": {
+            str(runtime): hashlib.sha256(runtime_content).hexdigest(),
+            str(launcher): hashlib.sha256(content.encode()).hexdigest()}}
+        manifest_content = json.dumps(manifest, indent=2) + "\n"
+        writes = [(runtime, runtime_content, 0o755), (launcher, content.encode(), 0o755),
+                  (manifest_path, manifest_content.encode(), 0o644)]
+        baseline["operations"][-1]["program_writes"] = {
+            str(path): {"before": program_value(path), "after": {
+                "sha256": hashlib.sha256(payload).hexdigest(), "mode": mode}}
+            for path, payload, mode in writes}
+        write_baseline(baseline_path, baseline)
+        for path, payload, mode in writes:
+            with tempfile.NamedTemporaryFile(prefix=".twinlink-", dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                try:
+                    os.fchmod(stream.fileno(), mode)
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
     baseline["operations"][-1]["status"] = "complete"
     baseline["operations"][-1].pop("packages_before", None)
     write_baseline(baseline_path, baseline)
@@ -363,6 +443,7 @@ def main():
     install_parser.add_argument("--prefix", default="/usr/local")
     install_parser.add_argument("--state-dir", default="/var/lib/twinlink", help="Private immutable installer baseline and journals")
     install_parser.add_argument("--skip-deps", action="store_true", help="check existing dependencies without package-manager changes")
+    install_parser.add_argument("--resume", action="store_true", help="resume interrupted installation, preserving original package snapshots and a baseline backup")
     install_parser.add_argument("--build-only", metavar="PATH", help="build a zipapp without root or Linux package changes")
     install_parser.add_argument("--rathole", metavar="PATH", help="check a separately obtained trusted executable")
     install_parser.add_argument("--rathole-sha256", help="require this SHA256 for the supplied rathole executable")
